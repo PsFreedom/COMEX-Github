@@ -1,0 +1,1 @@
+cmd_/root/kernel_module/comex_swap.ko := ld -r -m elf_x86_64 -T /root/linux-2.6.37/scripts/module-common.lds --build-id  -o /root/kernel_module/comex_swap.ko /root/kernel_module/comex_swap.o /root/kernel_module/comex_swap.mod.o
