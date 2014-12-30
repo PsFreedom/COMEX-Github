@@ -121,13 +121,12 @@ int main(int argc, char *argv[]){
 	
 	sendNLMssge("0");
 	
-	sprintf(strArea_start, "%lu", COMEX_Area);
+/*	sprintf(strArea_start, "%lu", COMEX_Area);
 	sprintf(strArea_end, "%lu", &COMEX_Area[totalInt-1]);
-	
 	sprintf(myMessage, "%d %s %s", 100, strArea_start, strArea_end);
 	printf("%s\n", myMessage);
 	sendNLMssge(myMessage);
-	
+*/	
 /*	print_free_list();
 	__rmqueue_smallest(3);
 	print_free_list();

@@ -755,12 +755,28 @@ EXPORT_SYMBOL(COMEX_Terminate);
 
 void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 
+	struct anon_vma *anon_vma;
+	struct anon_vma_chain *avc;
+	struct page *page;
+	
 	printk(KERN_INFO "%s: startAddr=%lu Order=%d\n", __FUNCTION__, startAddr, Order);
 	
-//	printk(KERN_INFO "%s: Pre COMEX_pages_list_size=%lu \n", __FUNCTION__, COMEX_pages_list_size);
-	COMEX_pages_list_size = COMEX_pages_list_size - powOrder(Order);
-//	printk(KERN_INFO "%s: Post COMEX_pages_list_size=%lu \n", __FUNCTION__, COMEX_pages_list_size);
+	page = lru_to_page(page_list);
+	list_del(&page->lru);
 	
+	list_for_each_entry(avc, &anon_vma->head, same_anon_vma) {
+		struct vm_area_struct *vma = avc->vma;
+		unsigned long address;
+		
+		address = vma_address(page, vma);
+		if (address == -EFAULT)
+			continue;
+			
+		printk(KERN_INFO "%s: Page's virtual addr - startAddr=%lu\n", __FUNCTION__, address);
+	}	
+	
+	
+	COMEX_pages_list_size = COMEX_pages_list_size - powOrder(Order);
 	if(COMEX_pages_list_size > 0){
 		COMEX_signal(COMEX_pages_list_size);
 //		printk(KERN_INFO "%s: If COMEX_pages_list_size=%lu \n", __FUNCTION__, COMEX_pages_list_size);
