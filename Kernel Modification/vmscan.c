@@ -42,6 +42,8 @@
 #include <linux/sysctl.h>
 #include <linux/netlink.h>
 
+#include <linux/hugetlb.h> 	// add for COMEX
+
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
 
@@ -692,10 +694,14 @@ static noinline_for_stack void free_page_list(struct list_head *free_pages)
 	pagevec_free(&freed_pvec);
 }
 
+//////////////////// COMEX ////////////////////
+
 int COMEX_pages_list_size = 0;
 unsigned int COMEX_PID = 0;
 unsigned int COMEX_Ready = 0;
 unsigned int COMEX_Waiting_for_Reply = 0;
+
+LIST_HEAD(keep_for_COMEX_pages);
 
 void COMEX_signal(int sigN){
 	struct siginfo info;
@@ -753,6 +759,27 @@ void COMEX_Terminate(){
 }
 EXPORT_SYMBOL(COMEX_Terminate);
 
+/*
+ * At what user virtual address is page expected in @vma?
+ * Returns virtual address or -EFAULT if page's index/offset is not
+ * within the range mapped the @vma.
+ */
+static inline unsigned long
+vma_address(struct page *page, struct vm_area_struct *vma)
+{
+	pgoff_t pgoff = page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
+	unsigned long address;
+
+	if (unlikely(is_vm_hugetlb_page(vma)))
+		pgoff = page->index << huge_page_order(page_hstate(page));
+	address = vma->vm_start + ((pgoff - vma->vm_pgoff) << PAGE_SHIFT);
+	if (unlikely(address < vma->vm_start || address >= vma->vm_end)) {
+		/* page should be within @vma mapping range */
+		return -EFAULT;
+	}
+	return address;
+}
+
 void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 
 	struct anon_vma *anon_vma;
@@ -761,8 +788,12 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 	
 	printk(KERN_INFO "%s: startAddr=%lu Order=%d\n", __FUNCTION__, startAddr, Order);
 	
-	page = lru_to_page(page_list);
-	list_del(&page->lru);
+	page = lru_to_page(&keep_for_COMEX_pages);
+//	list_del(&page->lru);
+
+	anon_vma = page_lock_anon_vma(page);
+	if (!anon_vma)
+		printk(KERN_INFO "%s: !anon_vma\n", __FUNCTION__);
 	
 	list_for_each_entry(avc, &anon_vma->head, same_anon_vma) {
 		struct vm_area_struct *vma = avc->vma;
@@ -772,9 +803,9 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 		if (address == -EFAULT)
 			continue;
 			
-		printk(KERN_INFO "%s: Page's virtual addr - startAddr=%lu\n", __FUNCTION__, address);
-	}	
-	
+		printk(KERN_INFO "%s: Page's virtual addr - %lu\n", __FUNCTION__, address);
+	}
+	page_unlock_anon_vma(anon_vma);
 	
 	COMEX_pages_list_size = COMEX_pages_list_size - powOrder(Order);
 	if(COMEX_pages_list_size > 0){
@@ -790,7 +821,6 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 }
 EXPORT_SYMBOL(COMEX_write_to_COMEX_area);
 
-LIST_HEAD(keep_for_COMEX_pages);
 /*
  * shrink_page_list() returns the number of reclaimed pages
  */
@@ -1344,6 +1374,8 @@ keep_lumpy:
 	return nr_reclaimed;
 }
 EXPORT_SYMBOL(COMEX_shrink_page_list);
+
+//////////////////// COMEX ////////////////////
 
 /*
  * Attempt to remove the specified page from its LRU.  Only take this page
