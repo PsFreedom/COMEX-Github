@@ -784,30 +784,71 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 
 	struct anon_vma *anon_vma;
 	struct anon_vma_chain *avc;
-	struct page *page;
+	struct page *page, *COMEX_Page;
+	unsigned long address;
+	int availPages = powOrder(Order);	// availPages from COMEX
+	
+	struct task_struct *COMEX_task_struct;
+	struct mm_struct *COMEX_mm;
+	struct vm_area_struct *COMEX_vma;
+	pgd_t *pgd;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *ptep, pte;
+	spinlock_t *ptl;
 	
 	printk(KERN_INFO "%s: startAddr=%lu Order=%d\n", __FUNCTION__, startAddr, Order);
-	
-	page = lru_to_page(&keep_for_COMEX_pages);
-//	list_del(&page->lru);
 
-	anon_vma = page_lock_anon_vma(page);
-	if (!anon_vma)
-		printk(KERN_INFO "%s: !anon_vma\n", __FUNCTION__);
+	COMEX_task_struct = pid_task(find_vpid(COMEX_PID), PIDTYPE_PID);
+	COMEX_mm = COMEX_task_struct->mm;
+	COMEX_vma = COMEX_mm->mmap;
 	
-	list_for_each_entry(avc, &anon_vma->head, same_anon_vma) {
-		struct vm_area_struct *vma = avc->vma;
-		unsigned long address;
+	COMEX_pages_list_size = COMEX_pages_list_size - availPages;		// Decrease list's size
+	
+//	while (!list_empty(&keep_for_COMEX_pages) && availPages>0 ){		
+	
+		page = lru_to_page(&keep_for_COMEX_pages);		//  Remove a single page from list.
+//		list_del(&page->lru);
+
+//		anon_vma = page_lock_anon_vma(page);		// Start Getting Vaddr using RMap
+//		if (!anon_vma)
+//			printk(KERN_INFO "%s: !anon_vma\n", __FUNCTION__);
 		
-		address = vma_address(page, vma);
-		if (address == -EFAULT)
-			continue;
+//		list_for_each_entry(avc, &anon_vma->head, same_anon_vma) {
+//			struct vm_area_struct *vma = avc->vma;			
 			
-		printk(KERN_INFO "%s: Page's virtual addr - %lu\n", __FUNCTION__, address);
-	}
-	page_unlock_anon_vma(anon_vma);
+//			address = vma_address(page, vma);		// Getting addr
+//			if (address == -EFAULT)
+//				continue;
+//			break;
+//		}
+//		page_unlock_anon_vma(anon_vma);			// End Getting Vaddr using RMap
+		
+//		memcpy(startAddr, address, 4096);
+		COMEX_Page = NULL;		
+		pgd = pgd_offset(COMEX_mm, startAddr);
+		if (pgd_none(*pgd) || pgd_bad(*pgd)){
+			printk(KERN_INFO "PGD bug\n");
+		}	
+		pud = pud_offset(pgd, startAddr);
+		if (pud_none(*pud) || pud_bad(*pud)){
+			printk(KERN_INFO "PUD bug\n");
+		}
+		pmd = pmd_offset(pud, startAddr);
+		if (pmd_none(*pmd) || pmd_bad(*pmd)){
+			printk(KERN_INFO "PMD bug\n");
+		}		
+		ptep = pte_offset_map_lock(COMEX_mm, pmd, startAddr, &ptl);
+		pte = *ptep;
+		COMEX_Page = pte_page(pte);
+		pte_unmap_unlock(ptep, ptl);
+
+		copy_user_highpage(COMEX_Page, page, COMEX_Page, COMEX_vma);
+		
+		availPages--;
+		startAddr = startAddr + 4096;
+//	}
 	
-	COMEX_pages_list_size = COMEX_pages_list_size - powOrder(Order);
 	if(COMEX_pages_list_size > 0){
 		COMEX_signal(COMEX_pages_list_size);
 //		printk(KERN_INFO "%s: If COMEX_pages_list_size=%lu \n", __FUNCTION__, COMEX_pages_list_size);

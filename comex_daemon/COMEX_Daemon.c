@@ -98,7 +98,7 @@ int init_Netlink(){
 
 int main(int argc, char *argv[]){	
 	int i;
-	unsigned long N_Pages,totalInt;
+	unsigned long N_Pages, totalInt, SumContent;
 	char strArea_start[30], strArea_end[30], myMessage[50];
 	
 	N_Pages = strtol(argv[1], NULL, 10);
@@ -107,11 +107,14 @@ int main(int argc, char *argv[]){
 	COMEX_Area = (int*)malloc(sizeof(int)*totalInt);
 	if(!mlock(COMEX_Area, sizeof(int)*totalInt)){
 		printf("Mlock success\n");
-
 	}
 	else{
 		printf("Mlock fails\n");
 		return -1;
+	}
+	
+	for(i=0; i<totalInt; i++){
+		COMEX_Area[i] = 0;
 	}
 	
 	printf("%s\n", __FUNCTION__);
@@ -135,9 +138,11 @@ int main(int argc, char *argv[]){
 */
 	
 	while(1){
+		SumContent = 0;
 		for(i=0; i<totalInt; i++){
-			COMEX_Area[i] = totalInt - i;
-		}
+			SumContent = SumContent + COMEX_Area[i];
+		}	
+		printf("SumContent = %lu\n", SumContent);
 		sleep(60);
 	}
 	
