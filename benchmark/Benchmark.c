@@ -15,10 +15,11 @@ int main(int argc, char *argv[]){
 		Mem_Area[i] = 1;
 	}
 	while(1){
-		sleep(60);
+		printf("Mem_Area[i] %d\n", Mem_Area[0]);
+		sleep(60);		
 		for(i=0; i<totalInt; i++){
 			Mem_Area[i] = Mem_Area[i] + 1;
-		}		
+		}
 	}
 	
 	return 0;
