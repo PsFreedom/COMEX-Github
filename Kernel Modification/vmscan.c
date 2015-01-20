@@ -707,6 +707,7 @@ struct vm_area_struct *COMEX_vma;
 
 LIST_HEAD(keep_for_COMEX_pages);
 LIST_HEAD(second_list_for_COMEX);
+LIST_HEAD(pages_to_free);
 
 void COMEX_signal(int sigN){
 	struct siginfo info;
@@ -755,6 +756,7 @@ void COMEX_init_ENV(unsigned int PID){
 	
 	INIT_LIST_HEAD(&keep_for_COMEX_pages);
 	INIT_LIST_HEAD(&second_list_for_COMEX);
+	INIT_LIST_HEAD(&pages_to_free);
 	
 	printk(KERN_INFO "COMEX_init_ENV: COMEX_Ready = %d COMEX_PID %d\n", COMEX_Ready, COMEX_PID);
 	COMEX_signal(-1);
@@ -808,11 +810,13 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 	
 	printk(KERN_INFO "%s: startAddr=%lu Order=%d\n", __FUNCTION__, startAddr, Order);
 	
-	COMEX_pages_list_size = COMEX_pages_list_size - availPages;		// Decrease list's size	
+	if(!list_empty(&second_list_for_COMEX)){
+		list_splice(&second_list_for_COMEX, &keep_for_COMEX_pages);
+		COMEX_pages_list_size += COMEX_2nd_list_size;
+		COMEX_2nd_list_size = 0;
+	}
+
 	while (!list_empty(&keep_for_COMEX_pages) && availPages>0 ){
-	
-		page = lru_to_page(&keep_for_COMEX_pages);		//  Remove a single page from list.
-		list_del(&page->lru);
 				
 		COMEX_Page = NULL;								// Page walk to get page descriptor
 		pgd = pgd_offset(COMEX_mm, startAddr);
@@ -832,23 +836,29 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 		COMEX_Page = pte_page(pte);					// getting page descriptor
 		pte_unmap_unlock(ptep, ptl);
 
-//		if (!trylock_page(page)){
+		page = lru_to_page(&keep_for_COMEX_pages);		//  Remove a single page from list.
+		list_del(&page->lru);
+		
+/*		if (!trylock_page(page)){
 //			list_add(&page->lru, &second_list_for_COMEX);
-//			COMEX_2nd_list_size++;
-//			continue;
-//		}
-//		if (!trylock_page(COMEX_Page)){
-//			availPages--;
-//			startAddr = startAddr + 4096;
-//			continue;
-//		}
-		copy_user_highpage(COMEX_Page, page, startAddr, COMEX_vma);	// Copying Content
+			
+			COMEX_pages_list_size--;
+			COMEX_2nd_list_size++;
+			printk(KERN_INFO "%s: Cannot lock page\n", __FUNCTION__);
+			continue;
+		}
+		if (!trylock_page(COMEX_Page)){
+			availPages--;
+			startAddr = startAddr + 4096;
+			printk(KERN_INFO "%s: Cannot lock COMEX_Page <<<<<<<<<<<<< \n", __FUNCTION__);
+			continue;
+		}
 		
-		
+//		copy_user_highpage(COMEX_Page, page, startAddr, COMEX_vma);	// Copying Content
+*/		
 		anon_vma = page_lock_anon_vma(page);		// Start Getting Vaddr using RMap
 		if (!anon_vma)
-			printk(KERN_INFO "%s: !anon_vma\n", __FUNCTION__);
-		
+			printk(KERN_INFO "%s: get anon_vma BUG\n", __FUNCTION__);					
 		list_for_each_entry(avc, &anon_vma->head, same_anon_vma) {	// Every vma in Rmap
 			struct vm_area_struct *vma = avc->vma;			
 			
@@ -871,27 +881,26 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 			}		
 			page_ptep = pte_offset_map_lock(page_mm, page_pmd, address, &page_ptl);		// get PTE
 //			set_pte(page_ptep, pte);			// Set PTE
-			pte_unmap_unlock(page_ptep, page_ptl);
-			
-			printk(KERN_INFO "%s: Addr=%lu to startAddr=%lu\n", __FUNCTION__, address, startAddr);
-			
+			pte_unmap_unlock(page_ptep, page_ptl);			
 //			do_page_add_anon_rmap(COMEX_Page, vma, address, 0);
+
+			printk(KERN_INFO "%s: Addr=%lu to startAddr=%lu\n", __FUNCTION__, address, startAddr);
 		}
 		page_unlock_anon_vma(anon_vma);			// End Getting Vaddr using RMap
+		
+//		list_add(&page->lru, &pages_to_free);		
 //		unlock_page(page);
 //		unlock_page(COMEX_Page);
 		
 		availPages--;
+		COMEX_pages_list_size--;
 		startAddr = startAddr + 4096;
-	}
-	
-	if(COMEX_pages_list_size > 0){
-		COMEX_signal(COMEX_pages_list_size);
-	}
-	else{
-		COMEX_pages_list_size = 0;
-		COMEX_Waiting_for_Reply = 0;
 	}	
+
+	if(!list_empty(&pages_to_free))
+		free_page_list(&pages_to_free);
+		
+	COMEX_Waiting_for_Reply = 0;
 	COMEX_signal(-3);
 }
 EXPORT_SYMBOL(COMEX_write_to_COMEX_area);
@@ -1146,7 +1155,7 @@ keep_lumpy:
 	 */
 	if (nr_dirty == nr_congested && nr_dirty != 0)
 		zone_set_flag(zone, ZONE_CONGESTED);
-
+	
 	free_page_list(&free_pages);
 
 	list_splice(&ret_pages, page_list);
