@@ -839,7 +839,7 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 		page = lru_to_page(&keep_for_COMEX_pages);		//  Remove a single page from list.
 		list_del(&page->lru);
 		
-/*		if (!trylock_page(page)){
+		if (!trylock_page(page)){
 //			list_add(&page->lru, &second_list_for_COMEX);
 			
 			COMEX_pages_list_size--;
@@ -855,7 +855,7 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 		}
 		
 //		copy_user_highpage(COMEX_Page, page, startAddr, COMEX_vma);	// Copying Content
-*/		
+		
 		anon_vma = page_lock_anon_vma(page);		// Start Getting Vaddr using RMap
 		if (!anon_vma)
 			printk(KERN_INFO "%s: get anon_vma BUG\n", __FUNCTION__);					
@@ -889,8 +889,8 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 		page_unlock_anon_vma(anon_vma);			// End Getting Vaddr using RMap
 		
 //		list_add(&page->lru, &pages_to_free);		
-//		unlock_page(page);
-//		unlock_page(COMEX_Page);
+		unlock_page(page);
+		unlock_page(COMEX_Page);
 		
 		availPages--;
 		COMEX_pages_list_size--;
