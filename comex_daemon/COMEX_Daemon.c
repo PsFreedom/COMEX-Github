@@ -143,7 +143,7 @@ int main(int argc, char *argv[]){
 			SumContent = SumContent + COMEX_Area[i];
 		}	
 		printf("SumContent = %lu\n", SumContent);
-		sleep(60);
+		sleep(30);
 	}
 	
 	close(sock_fd);
