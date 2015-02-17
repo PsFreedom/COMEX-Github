@@ -124,12 +124,12 @@ int main(int argc, char *argv[]){
 	
 	sendNLMssge("0");
 	
-/*	sprintf(strArea_start, "%lu", COMEX_Area);
+	sprintf(strArea_start, "%lu", COMEX_Area);
 	sprintf(strArea_end, "%lu", &COMEX_Area[totalInt-1]);
 	sprintf(myMessage, "%d %s %s", 100, strArea_start, strArea_end);
-	printf("%s\n", myMessage);
-	sendNLMssge(myMessage);
-*/	
+//	printf("%s\n", myMessage);
+//	sendNLMssge(myMessage);
+	
 /*	print_free_list();
 	__rmqueue_smallest(3);
 	print_free_list();
@@ -139,11 +139,19 @@ int main(int argc, char *argv[]){
 	
 	while(1){
 		SumContent = 0;
+//		sendNLMssge(myMessage);		//
+//		sleep(15);					//
+//		sendNLMssge(myMessage);		//
+//		sleep(15);					//
 		for(i=0; i<totalInt; i++){
 			SumContent = SumContent + COMEX_Area[i];
 		}	
 		printf("SumContent = %lu\n", SumContent);
-		sleep(30);
+//		sleep(15);					//
+//		sendNLMssge(myMessage);		//
+//		sleep(15);					//
+//		sendNLMssge(myMessage);		//
+		sleep(15);
 	}
 	
 	close(sock_fd);
