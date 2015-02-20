@@ -701,9 +701,14 @@ int COMEX_2nd_list_size = 0;
 unsigned int COMEX_PID = 0;
 unsigned int COMEX_Ready = 0;
 unsigned int COMEX_Waiting_for_Reply = 0;
+unsigned long COMEX_nr_anon;
+unsigned long COMEX_nr_file;
+
 struct task_struct *COMEX_task_struct;
 struct mm_struct *COMEX_mm;
 struct vm_area_struct *COMEX_vma;
+struct zone *keepZone;
+struct scan_control keepSc;
 
 LIST_HEAD(keep_for_COMEX_pages);
 //LIST_HEAD(second_list_for_COMEX);
@@ -793,6 +798,11 @@ vma_address(struct page *page, struct vm_area_struct *vma)
 	return address;
 }
 
+static noinline_for_stack void
+putback_lru_pages(struct zone *zone, struct scan_control *sc,
+				unsigned long nr_anon, unsigned long nr_file,
+				struct list_head *page_list);
+
 void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 	struct anon_vma *anon_vma;
 	struct anon_vma_chain *avc;
@@ -853,14 +863,14 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 			
 			copy_user_highpage(COMEX_Page, page, startAddr, COMEX_vma);	// Copying Content
 			result = COMEX_PTE_unmap(page, vma, address, TTU_UNMAP, COMEX_pte);	
-//			copy_user_highpage(COMEX_Page, page, startAddr, COMEX_vma);	// Copying Content
 			
-//			do_page_add_anon_rmap(COMEX_Page, vma, address, 0);
-//			mem_cgroup_commit_charge_swapin(COMEX_Page, mem_cgroup_ptr);
+			do_page_add_anon_rmap(COMEX_Page, vma, address, 0);
+			mem_cgroup_commit_charge_swapin(COMEX_Page, mem_cgroup_ptr);
 		}
 		page_unlock_anon_vma(anon_vma);			// End Getting Vaddr using RMap
 		
-		list_add(&page->lru, &pages_to_free);		
+		list_add(&page->lru, &pages_to_free);
+//		putback_lru_page(page);
 		pte_unmap_unlock(ptep, ptl);
 		unlock_page(COMEX_Page);
 		unlock_page(page);
@@ -870,7 +880,9 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 		startAddr = startAddr + 4096;
 	}	
 
-	free_page_list(&pages_to_free);
+	printk(KERN_INFO "%s: Call putback_lru_pages\n", __FUNCTION__);
+	putback_lru_pages(keepZone, &keepSc, 0, 0, &pages_to_free);
+//	free_page_list(&pages_to_free);
 	if(!list_empty(&keep_for_COMEX_pages)){
 		COMEX_signal(COMEX_pages_list_size);
 		printk(KERN_INFO "%s: Not Empty %d\n", __FUNCTION__, COMEX_pages_list_size);
@@ -972,7 +984,6 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				COMEX_pages_list_size++;
 				list_update = 1;
 				nr_reclaimed++;
-//				unlock_page(page);
 				list_add(&page->lru, &keep_for_COMEX_pages);
 				continue;
 			}
@@ -1127,6 +1138,21 @@ keep_lumpy:
 		VM_BUG_ON(PageLRU(page) || PageUnevictable(page));
 	}
 
+	keepZone = zone;
+	keepSc.nr_scanned = sc->nr_scanned;
+	keepSc.nr_reclaimed = sc->nr_reclaimed;
+	keepSc.nr_to_reclaim = sc->nr_to_reclaim;
+	keepSc.hibernation_mode = sc->hibernation_mode;
+	keepSc.gfp_mask = sc->gfp_mask;
+	keepSc.may_writepage = sc->may_writepage;
+	keepSc.may_unmap = sc->may_unmap;
+	keepSc.may_swap = sc->may_swap;
+	keepSc.swappiness = sc->swappiness;
+	keepSc.order = sc->order;
+	keepSc.lumpy_reclaim_mode = sc->lumpy_reclaim_mode;
+	keepSc.mem_cgroup = sc->mem_cgroup;
+	keepSc.nodemask = sc->nodemask;
+	
 	/*
 	 * Tag a zone as congested if all the dirty pages encountered were
 	 * backed by a congested BDI. In this case, reclaimers should just
@@ -1751,13 +1777,18 @@ putback_lru_pages(struct zone *zone, struct scan_control *sc,
 	/*
 	 * Put back any unfreeable pages.
 	 */
+	 
+//	printk(KERN_INFO "%s: #############\n", __FUNCTION__);
 	spin_lock(&zone->lru_lock);
 	while (!list_empty(page_list)) {
 		int lru;
 		page = lru_to_page(page_list);
 		VM_BUG_ON(PageLRU(page));
 		list_del(&page->lru);
+		
+//		printk(KERN_INFO "%s: in While\n", __FUNCTION__);
 		if (unlikely(!page_evictable(page, NULL))) {
+//			printk(KERN_INFO "%s: in !page_evictable(page, NULL)\n", __FUNCTION__);
 			spin_unlock_irq(&zone->lru_lock);
 			putback_lru_page(page);
 			spin_lock_irq(&zone->lru_lock);
@@ -1767,10 +1798,12 @@ putback_lru_pages(struct zone *zone, struct scan_control *sc,
 		lru = page_lru(page);
 		add_page_to_lru_list(zone, page, lru);
 		if (is_active_lru(lru)) {
+//			printk(KERN_INFO "%s: in is_active_lru\n", __FUNCTION__);
 			int file = is_file_lru(lru);
 			reclaim_stat->recent_rotated[file]++;
 		}
 		if (!pagevec_add(&pvec, page)) {
+//			printk(KERN_INFO "%s: in !pagevec_add(&pvec, page)\n", __FUNCTION__);
 			spin_unlock_irq(&zone->lru_lock);
 			__pagevec_release(&pvec);
 			spin_lock_irq(&zone->lru_lock);
@@ -1781,6 +1814,7 @@ putback_lru_pages(struct zone *zone, struct scan_control *sc,
 
 	spin_unlock_irq(&zone->lru_lock);
 	pagevec_release(&pvec);
+//	printk(KERN_INFO "%s: Finish\n", __FUNCTION__);
 }
 
 static noinline_for_stack void update_isolated_counts(struct zone *zone,
@@ -1917,6 +1951,9 @@ shrink_inactive_list(unsigned long nr_to_scan, struct zone *zone,
 
 	spin_unlock_irq(&zone->lru_lock);
 
+	COMEX_nr_anon = nr_anon;
+	COMEX_nr_file = nr_file;
+	
 	nr_reclaimed = shrink_page_list(&page_list, zone, sc);
 
 	/* Check if we should syncronously wait for writeback */
