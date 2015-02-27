@@ -204,7 +204,7 @@ int COMEX_try_to_unmap(struct page *, enum ttu_flags flags, struct vm_area_struc
 int try_to_unmap_one(struct page *, struct vm_area_struct *,
 			unsigned long address, enum ttu_flags flags);
 int COMEX_PTE_unmap(struct page *, struct vm_area_struct *,
-			unsigned long address, enum ttu_flags flags, pte_t pte_to_set);
+			unsigned long address, enum ttu_flags flags, pte_t pte_to_set, struct page *COMEX_Page);
 
 /*
  * Called from mm/filemap_xip.c to unmap empty zero page

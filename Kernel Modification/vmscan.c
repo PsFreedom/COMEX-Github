@@ -811,7 +811,6 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 	int availPages = powOrder(Order);	// availPages from COMEX
 	int result = 0;
 	
-//	struct mm_struct *page_mm;
 	struct mem_cgroup *mem_cgroup_ptr = NULL;
 	struct address_space *mapping;
 	pgd_t *pgd, *page_pgd;
@@ -862,15 +861,14 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 				continue;
 			
 			copy_user_highpage(COMEX_Page, page, startAddr, COMEX_vma);	// Copying Content
-			result = COMEX_PTE_unmap(page, vma, address, TTU_UNMAP, COMEX_pte);	
+			result = COMEX_PTE_unmap(page, vma, address, TTU_UNMAP, COMEX_pte, COMEX_Page);	
 			
-			do_page_add_anon_rmap(COMEX_Page, vma, address, 0);
-			mem_cgroup_commit_charge_swapin(COMEX_Page, mem_cgroup_ptr);
+//			do_page_add_anon_rmap(COMEX_Page, vma, address, 0);
+//			mem_cgroup_commit_charge_swapin(COMEX_Page, mem_cgroup_ptr);
 		}
 		page_unlock_anon_vma(anon_vma);			// End Getting Vaddr using RMap
 		
 		list_add(&page->lru, &pages_to_free);
-//		putback_lru_page(page);
 		pte_unmap_unlock(ptep, ptl);
 		unlock_page(COMEX_Page);
 		unlock_page(page);
@@ -880,9 +878,7 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 		startAddr = startAddr + 4096;
 	}	
 
-	printk(KERN_INFO "%s: Call putback_lru_pages\n", __FUNCTION__);
 	putback_lru_pages(keepZone, &keepSc, 0, 0, &pages_to_free);
-//	free_page_list(&pages_to_free);
 	if(!list_empty(&keep_for_COMEX_pages)){
 		COMEX_signal(COMEX_pages_list_size);
 		printk(KERN_INFO "%s: Not Empty %d\n", __FUNCTION__, COMEX_pages_list_size);

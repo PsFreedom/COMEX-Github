@@ -1086,7 +1086,7 @@ out_mlock:
 	return ret;
 }
 int COMEX_PTE_unmap(struct page *page, struct vm_area_struct *vma,
-		     unsigned long address, enum ttu_flags flags, pte_t pte_to_set)
+		     unsigned long address, enum ttu_flags flags, pte_t pte_to_set, struct page *COMEX_Page)
 {
 	struct mm_struct *mm = vma->vm_mm;
 	pte_t *pte;
@@ -1176,6 +1176,8 @@ int COMEX_PTE_unmap(struct page *page, struct vm_area_struct *vma,
 
 	page_remove_rmap(page);
 	page_cache_release(page);
+	
+	COMEX_map_to_comex(COMEX_Page, vma, mm, address);
 
 out_unmap:
 	pte_unmap_unlock(pte, ptl);
