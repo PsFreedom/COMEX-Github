@@ -810,6 +810,7 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 	unsigned long address;
 	int availPages = powOrder(Order);	// availPages from COMEX
 	int result = 0;
+	int mapcount_old, mapcount_COMEX;
 	
 	struct mem_cgroup *mem_cgroup_ptr = NULL;
 	struct address_space *mapping;
@@ -849,6 +850,8 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 		page = lru_to_page(&keep_for_COMEX_pages);		//  Remove a single page from list.
 		list_del(&page->lru);
 		
+		mapcount_old = page_mapcount(page);
+		mapcount_COMEX = page_mapcount(COMEX_Page);
 		anon_vma = page_lock_anon_vma(page);		// Start Getting Vaddr using RMap
 		if (!anon_vma)
 			printk(KERN_INFO "%s: get anon_vma BUG\n", __FUNCTION__);
@@ -860,13 +863,17 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 			if (address == -EFAULT)
 				continue;
 			
-			copy_user_highpage(COMEX_Page, page, startAddr, COMEX_vma);	// Copying Content
-			result = COMEX_PTE_unmap(page, vma, address, TTU_UNMAP, COMEX_pte, COMEX_Page);	
+			copy_user_highpage(COMEX_Page, page, startAddr, COMEX_vma);	// Copying Content			
+			__SetPageUptodate(COMEX_Page);
+//			mem_cgroup_newpage_charge(COMEX_Page, vma->vm_mm, GFP_KERNEL);
 			
-//			do_page_add_anon_rmap(COMEX_Page, vma, address, 0);
-//			mem_cgroup_commit_charge_swapin(COMEX_Page, mem_cgroup_ptr);
+			result = COMEX_PTE_unmap(page, vma, address, TTU_UNMAP, COMEX_pte, COMEX_Page);			
 		}
 		page_unlock_anon_vma(anon_vma);			// End Getting Vaddr using RMap
+		printk(KERN_INFO "%s: page %p COMEX %p - map_old %d map_COMEX %d | map_old %d map_COMEX %d\n", 
+						__FUNCTION__, page, COMEX_Page, 
+						mapcount_old, mapcount_COMEX, 
+						page_mapcount(page), page_mapcount(COMEX_Page));
 		
 		list_add(&page->lru, &pages_to_free);
 		pte_unmap_unlock(ptep, ptl);
@@ -1107,6 +1114,7 @@ free_it:
 		 * Is there need to periodically free_page_list? It would
 		 * appear not as the counts should be low
 		 */
+//		printk(KERN_INFO "%s: Add to free_pages\n", __FUNCTION__);
 		list_add(&page->lru, &free_pages);
 		continue;
 
