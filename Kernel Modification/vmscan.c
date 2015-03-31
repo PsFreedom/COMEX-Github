@@ -40,9 +40,6 @@
 #include <linux/memcontrol.h>
 #include <linux/delayacct.h>
 #include <linux/sysctl.h>
-#include <linux/netlink.h>
-
-#include <linux/hugetlb.h> 	// add for COMEX
 
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
@@ -54,14 +51,14 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/vmscan.h>
 
-
+#include <linux/netlink.h>
+#include <linux/hugetlb.h> 	// add for COMEX
 #include <linux/kernel.h>
 #include <asm/siginfo.h>	//siginfo
 #include <linux/rcupdate.h>	//rcu_read_lock
 #include <linux/sched.h>	//find_task_by_pid_type
 #include <linux/uaccess.h>
 #define SIG_TEST 44 /* we define our own signal, hard coded since SIGRTMIN is different in user and in kernel space */ 
-
 
 enum lumpy_mode {
 	LUMPY_MODE_NONE,
@@ -697,7 +694,6 @@ static noinline_for_stack void free_page_list(struct list_head *free_pages)
 //////////////////// COMEX ////////////////////
 
 int COMEX_pages_list_size = 0;
-int COMEX_2nd_list_size = 0;
 unsigned int COMEX_PID = 0;
 unsigned int COMEX_Ready = 0;
 unsigned int COMEX_Waiting_for_Reply = 0;
@@ -711,7 +707,6 @@ struct zone *keepZone;
 struct scan_control keepSc;
 
 LIST_HEAD(keep_for_COMEX_pages);
-//LIST_HEAD(second_list_for_COMEX);
 LIST_HEAD(pages_to_free);
 
 void COMEX_signal(int sigN){
@@ -760,7 +755,6 @@ void COMEX_init_ENV(unsigned int PID){
 	COMEX_vma = COMEX_mm->mmap;
 	
 	INIT_LIST_HEAD(&keep_for_COMEX_pages);
-//	INIT_LIST_HEAD(&second_list_for_COMEX);
 	INIT_LIST_HEAD(&pages_to_free);
 	
 	printk(KERN_INFO "COMEX_init_ENV: COMEX_Ready = %d COMEX_PID %d\n", COMEX_Ready, COMEX_PID);
@@ -769,7 +763,6 @@ void COMEX_init_ENV(unsigned int PID){
 EXPORT_SYMBOL(COMEX_init_ENV);
 
 void COMEX_Terminate(){
-
 	COMEX_Ready = 0;
 	
 	printk(KERN_INFO "%s: COMEX_Ready = %d\n", __FUNCTION__, COMEX_Ready);
@@ -809,17 +802,12 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 	struct page *page, *COMEX_Page;
 	unsigned long address;
 	int availPages = powOrder(Order);	// availPages from COMEX
-	int result = 0;
-	int mapcount_old, mapcount_COMEX;
-	int count_old, count_COMEX;
 	
-	struct mem_cgroup *mem_cgroup_ptr = NULL;
-	struct address_space *mapping;
-	pgd_t *pgd, *page_pgd;
-	pud_t *pud, *page_pud;
-	pmd_t *pmd, *page_pmd;
-	pte_t *ptep, COMEX_pte, *page_ptep, page_pte, pteval;
-	spinlock_t *ptl, *page_ptl;
+	pgd_t *pgd;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *ptep, COMEX_pte;
+	spinlock_t *ptl;
 	
 	printk(KERN_INFO "%s: startAddr=%lu Order=%d\n", __FUNCTION__, startAddr, Order);
 
@@ -854,11 +842,6 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 		copy_user_highpage(COMEX_Page, page, startAddr, COMEX_vma);	// Copying Content
 		__SetPageUptodate(COMEX_Page);
 		
-//		count_old = atomic_read(&page->_count);
-//		count_COMEX = atomic_read(&COMEX_Page->_count);
-//		mapcount_old = page_mapcount(page);
-//		mapcount_COMEX = page_mapcount(COMEX_Page);
-		
 		anon_vma = page_lock_anon_vma(page);		// Start Getting Vaddr using RMap
 		if (!anon_vma)
 			printk(KERN_INFO "%s: get anon_vma BUG\n", __FUNCTION__);
@@ -869,20 +852,11 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 			address = vma_address(page, vma);		// Getting addr	
 			if (address == -EFAULT)
 				continue;						
-			
-//			mem_cgroup_newpage_charge(COMEX_Page, vma->vm_mm, GFP_KERNEL);			
-			result = COMEX_PTE_unmap(page, vma, address, TTU_UNMAP, COMEX_pte, COMEX_Page);
+				
+			COMEX_PTE_unmap(page, vma, address, TTU_UNMAP, COMEX_pte, COMEX_Page);
 			atomic_inc(&COMEX_Page->_count);
 		}
 		page_unlock_anon_vma(anon_vma);			// End Getting Vaddr using RMap
-//		printk(KERN_INFO "%s: page %p COMEX %p - map_old %d map_COMEX %d >> map_old %d map_COMEX %d\n", 
-//						__FUNCTION__, page, COMEX_Page, 
-//						mapcount_old, mapcount_COMEX, 
-//						page_mapcount(page), page_mapcount(COMEX_Page));
-//		printk(KERN_INFO "%s: page %p COMEX %p - count_old %d count_COMEX %d >> count_old %d count_COMEX %d\n", 
-//						__FUNCTION__, page, COMEX_Page, 
-//						count_old, count_COMEX, 
-//						atomic_read(&page->_count), atomic_read(&COMEX_Page->_count));
 		
 		list_add(&page->lru, &pages_to_free);
 		pte_unmap_unlock(ptep, ptl);
@@ -990,18 +964,17 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		 * Try to allocate it some swap space here.
 		 */
 		if (PageAnon(page) && !PageSwapCache(page)) {
-		
+			if (!(sc->gfp_mask & __GFP_IO))
+				goto keep_locked;
+				
 			if(COMEX_Ready == 1){
-//				printk(KERN_INFO "%s: PageAnon(page)\n", __FUNCTION__);
-				COMEX_pages_list_size++;
 				list_update = 1;
+				COMEX_pages_list_size++;
 				nr_reclaimed++;
 				list_add(&page->lru, &keep_for_COMEX_pages);
 				continue;
 			}
-		
-			if (!(sc->gfp_mask & __GFP_IO))
-				goto keep_locked;
+			
 			if (!add_to_swap(page))
 				goto activate_locked;
 			may_enter_fs = 1;
@@ -1123,7 +1096,6 @@ free_it:
 		 * Is there need to periodically free_page_list? It would
 		 * appear not as the counts should be low
 		 */
-//		printk(KERN_INFO "%s: Add to free_pages\n", __FUNCTION__);
 		list_add(&page->lru, &free_pages);
 		continue;
 
@@ -1790,18 +1762,13 @@ putback_lru_pages(struct zone *zone, struct scan_control *sc,
 	/*
 	 * Put back any unfreeable pages.
 	 */
-	 
-//	printk(KERN_INFO "%s: #############\n", __FUNCTION__);
 	spin_lock(&zone->lru_lock);
 	while (!list_empty(page_list)) {
 		int lru;
 		page = lru_to_page(page_list);
 		VM_BUG_ON(PageLRU(page));
 		list_del(&page->lru);
-		
-//		printk(KERN_INFO "%s: in While\n", __FUNCTION__);
 		if (unlikely(!page_evictable(page, NULL))) {
-//			printk(KERN_INFO "%s: in !page_evictable(page, NULL)\n", __FUNCTION__);
 			spin_unlock_irq(&zone->lru_lock);
 			putback_lru_page(page);
 			spin_lock_irq(&zone->lru_lock);
@@ -1811,12 +1778,10 @@ putback_lru_pages(struct zone *zone, struct scan_control *sc,
 		lru = page_lru(page);
 		add_page_to_lru_list(zone, page, lru);
 		if (is_active_lru(lru)) {
-//			printk(KERN_INFO "%s: in is_active_lru\n", __FUNCTION__);
 			int file = is_file_lru(lru);
 			reclaim_stat->recent_rotated[file]++;
 		}
 		if (!pagevec_add(&pvec, page)) {
-//			printk(KERN_INFO "%s: in !pagevec_add(&pvec, page)\n", __FUNCTION__);
 			spin_unlock_irq(&zone->lru_lock);
 			__pagevec_release(&pvec);
 			spin_lock_irq(&zone->lru_lock);
@@ -1827,7 +1792,6 @@ putback_lru_pages(struct zone *zone, struct scan_control *sc,
 
 	spin_unlock_irq(&zone->lru_lock);
 	pagevec_release(&pvec);
-//	printk(KERN_INFO "%s: Finish\n", __FUNCTION__);
 }
 
 static noinline_for_stack void update_isolated_counts(struct zone *zone,

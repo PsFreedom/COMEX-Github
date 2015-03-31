@@ -1092,12 +1092,13 @@ int COMEX_PTE_unmap(struct page *page, struct vm_area_struct *vma,
 	pte_t *pte;
 	pte_t pteval, pte_keep12bits;
 	spinlock_t *ptl;
-	int ret = SWAP_AGAIN;
+	int ret = 0;
 	
 	pte = page_check_address(page, mm, address, &ptl, 0);
 	if (!pte)
 		goto out;
-		
+	
+	ret = 1;
 	pte_keep12bits.pte = pte->pte & 4095;
 	pte_to_set.pte = pte_to_set.pte >> 12;
 	pte_to_set.pte = pte_to_set.pte << 12;
@@ -1106,7 +1107,6 @@ int COMEX_PTE_unmap(struct page *page, struct vm_area_struct *vma,
 
 	/* Nuke the page table entry. */
 	flush_cache_page(vma, address, page_to_pfn(page));	// Safe
-//	pteval = ptep_clear_flush_notify(vma, address, pte);	// Safe
 	pteval = ptep_clear_flush(vma, address, pte);
 	do_page_add_anon_rmap(COMEX_Page, vma, address, 0);
 
@@ -1117,7 +1117,6 @@ int COMEX_PTE_unmap(struct page *page, struct vm_area_struct *vma,
 	/* Update high watermark before we lower rss */
 	update_hiwater_rss(mm);		// Safe
 
-//	set_pte_at(mm, address, pte, pte_to_set);
 	set_pte_at_notify(mm, address, pte, pte_to_set);
 	update_mmu_cache(vma, address, pte);
 
@@ -1129,6 +1128,7 @@ out_unmap:
 out:
 	return ret;
 }
+
 int COMEX_try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		     unsigned long address, enum ttu_flags flags)
 {

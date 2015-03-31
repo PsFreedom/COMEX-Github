@@ -1036,7 +1036,6 @@ extern void COMEX_init_ENV(unsigned int PID);
 extern void COMEX_Terminate(void);
 extern void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order);
 extern unsigned long COMEX_shrink_page_list(struct list_head *page_list, struct vm_area_struct *COMEX_vma);
-extern int COMEX_do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma, unsigned long address, pte_t *page_table, pmd_t *pmd, unsigned int flags, pte_t orig_pte);
 
 int vma_wants_writenotify(struct vm_area_struct *vma);
 

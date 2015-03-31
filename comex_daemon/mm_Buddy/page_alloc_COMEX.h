@@ -113,10 +113,10 @@ void print_free_list(){
 int initBuddy(long N_Pages){
 	int i;
 	
-	COMEXpages = (struct page*)malloc(sizeof(struct page)*N_Pages);
-	COMEXzone = (struct zone*)malloc(sizeof(struct zone));
+	COMEXpages = (struct page*)malloc(sizeof(struct page)*N_Pages);		// Create COMEX's page descriptor
+	COMEXzone = (struct zone*)malloc(sizeof(struct zone));		// Zone descriptor (only 1)
 	for(i=0; i<MAX_ORDER; i++){
-		INIT_LIST_HEAD(&COMEXzone->free_area[i].free_list[0]);
+		INIT_LIST_HEAD(&COMEXzone->free_area[i].free_list[0]);	// Init list head for each freelist
 	}	
 	
 	for(i=0; i<N_Pages; i++){

@@ -101,11 +101,11 @@ int main(int argc, char *argv[]){
 	unsigned long N_Pages, totalInt, SumContent;
 	char strArea_start[30], strArea_end[30], myMessage[50];
 	
-	N_Pages = strtol(argv[1], NULL, 10);
-	totalInt = N_Pages*1024;
+	N_Pages = strtol(argv[1], NULL, 10);	// Number of Pages as input.
+	totalInt = N_Pages*1024;				// int => 4 bytes * 1024 = 1 page
 	
-	COMEX_Area = (int*)malloc(sizeof(int)*totalInt);
-	if(!mlock(COMEX_Area, sizeof(int)*totalInt)){
+	COMEX_Area = (int*)malloc(sizeof(int)*totalInt);	// Mem allocation
+	if(!mlock(COMEX_Area, sizeof(int)*totalInt)){		// Pin down
 		printf("Mlock success\n");
 	}
 	else{
@@ -113,20 +113,20 @@ int main(int argc, char *argv[]){
 		return -1;
 	}
 	
-	for(i=0; i<totalInt; i++){
+	for(i=0; i<totalInt; i++){		// Init all page to 0
 		COMEX_Area[i] = 0;
 	}
 	
-	printf("%s\n", __FUNCTION__);
+	printf("%s\n", __FUNCTION__);	
 	initBuddy(N_Pages);
 	init_Netlink();
 	init_SignalHandler();
 	
 	sendNLMssge("0");
 	
-	sprintf(strArea_start, "%lu", COMEX_Area);
-	sprintf(strArea_end, "%lu", &COMEX_Area[totalInt-1]);
-	sprintf(myMessage, "%d %s %s", 100, strArea_start, strArea_end);
+//	sprintf(strArea_start, "%lu", COMEX_Area);
+//	sprintf(strArea_end, "%lu", &COMEX_Area[totalInt-1]);
+//	sprintf(myMessage, "%d %s %s", 100, strArea_start, strArea_end);
 //	printf("%s\n", myMessage);
 //	sendNLMssge(myMessage);
 	
@@ -139,18 +139,10 @@ int main(int argc, char *argv[]){
 	
 	while(1){
 		SumContent = 0;
-//		sendNLMssge(myMessage);		//
-//		sleep(15);					//
-//		sendNLMssge(myMessage);		//
-//		sleep(15);					//
 		for(i=0; i<totalInt; i++){
 			SumContent = SumContent + COMEX_Area[i];
 		}	
 		printf("SumContent = %lu\n", SumContent);
-//		sleep(15);					//
-//		sendNLMssge(myMessage);		//
-//		sleep(15);					//
-//		sendNLMssge(myMessage);		//
 		sleep(15);
 	}
 	
