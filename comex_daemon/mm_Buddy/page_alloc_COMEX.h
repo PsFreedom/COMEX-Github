@@ -3,6 +3,8 @@
 #include "list.h"
 
 #define set_page_private(page, v)       ((page)->private = (v))
+#define page_private(page)              ((page)->private)
+#define pfn_valid_within(pfn) 	(1)
 #define BIGGEST_GROUP 1024
 #define PAGE_BUDDY_MAPCOUNT_VALUE (-128)
 
@@ -91,6 +93,144 @@ struct page *__rmqueue_smallest(unsigned int order)
 
 	return NULL;
 }
+
+///////////////// Deallocation///////////////////
+
+unsigned long page_to_pfn(struct page *page){
+	return page->pageNO;
+}
+static inline unsigned long page_order(struct page *page)
+{
+	 /* PageBuddy() must be checked by the caller */
+	 return page_private(page);
+}
+static inline int PageBuddy(struct page *page)
+{
+	return (page->_mapcount == PAGE_BUDDY_MAPCOUNT_VALUE);
+}
+static inline int page_is_buddy(struct page *page, struct page *buddy, int order)
+{
+	if (PageBuddy(buddy) && page_order(buddy) == order) {
+		return 1;
+	}
+	return 0;
+}
+static inline unsigned long
+__find_combined_index(unsigned long page_idx, unsigned int order)
+{
+	return (page_idx & ~(1 << order));
+}
+
+/*
+ * Locate the struct page for both the matching buddy in our
+ * pair (buddy1) and the combined O(n+1) page they form (page).
+ *
+ * 1) Any buddy B1 will have an order O twin B2 which satisfies
+ * the following equation:
+ *     B2 = B1 ^ (1 << O)
+ * For example, if the starting buddy (buddy2) is #8 its order
+ * 1 buddy is #10:
+ *     B2 = 8 ^ (1 << 1) = 8 ^ 2 = 10
+ *
+ * 2) Any buddy B will have an order O+1 parent P which
+ * satisfies the following equation:
+ *     P = B & ~(1 << O)
+ *
+ * Assumption: *_mem_map is contiguous at least up to MAX_ORDER
+ */
+static inline struct page *
+__page_find_buddy(struct page *page, unsigned long page_idx, unsigned int order)
+{
+	unsigned long buddy_idx = page_idx ^ (1 << order);
+
+	return page + (buddy_idx - page_idx);
+}
+
+/*
+ * Freeing function for a buddy system allocator.
+ *
+ * The concept of a buddy system is to maintain direct-mapped table
+ * (containing bit values) for memory blocks of various "orders".
+ * The bottom level table contains the map for the smallest allocatable
+ * units of memory (here, pages), and each level above it describes
+ * pairs of units from the levels below, hence, "buddies".
+ * At a high level, all that happens here is marking the table entry
+ * at the bottom level available, and propagating the changes upward
+ * as necessary, plus some accounting needed to play nicely with other
+ * parts of the VM system.
+ * At each level, we keep a list of pages, which are heads of continuous
+ * free pages of length of (1 << order) and marked with PG_buddy. Page's
+ * order is recorded in page_private(page) field.
+ * So when we are allocating or freeing one, we can derive the state of the
+ * other.  That is, if we allocate a small block, and both were   
+ * free, the remainder of the region must be split into blocks.   
+ * If a block is freed, and its buddy is also free, then this
+ * triggers coalescing into a block of larger size.            
+ *
+ * -- wli
+ */
+
+static inline void __free_one_page(struct page *page, unsigned int order)
+{
+	unsigned long page_idx;
+	unsigned long combined_idx;
+	int migratetype = 0;
+	struct zone *zone = COMEXzone;
+	struct page *buddy;
+
+//	if (unlikely(PageCompound(page)))
+//		if (unlikely(destroy_compound_page(page, order)))
+//			return;
+
+	page_idx = page_to_pfn(page) & ((1 << MAX_ORDER) - 1);
+	printf("page_idx %lu\n", page_idx);
+
+	while (order < MAX_ORDER-1) {
+		buddy = __page_find_buddy(page, page_idx, order);
+//		printf("Buddy %lu\n", buddy->pageNO );
+		if (!page_is_buddy(page, buddy, order)){
+			printf("!page_is_buddy \n");
+			break;
+		}
+
+	//	 Our buddy is free, merge with it and move up one order. 
+		list_del(&buddy->lru);
+		zone->free_area[order].nr_free--;
+		rmv_page_order(buddy);
+		combined_idx = __find_combined_index(page_idx, order);
+		page = page + (combined_idx - page_idx);
+		page_idx = combined_idx;
+		order++;
+	}
+	set_page_order(page, order);
+
+	///
+	 // If this is not the largest possible page, check if the buddy
+	 // of the next-highest order is free. If it is, it's possible
+	 // that pages are being freed that will coalesce soon. In case,
+	 // that is happening, add the free page to the tail of the list
+	 // so it's less likely to be used soon and more likely to be merged
+	 // as a higher order page
+	 ///
+	if ((order < MAX_ORDER-2) && pfn_valid_within(page_to_pfn(buddy))) {
+		struct page *higher_page, *higher_buddy;
+		combined_idx = __find_combined_index(page_idx, order);
+		higher_page = page + combined_idx - page_idx;
+		higher_buddy = __page_find_buddy(higher_page, combined_idx, order + 1);
+		if (page_is_buddy(higher_page, higher_buddy, order + 1)) {
+			list_add_tail(&page->lru,
+				&zone->free_area[order].free_list[migratetype]);
+			goto out;
+		}
+	}
+
+	list_add(&page->lru, &zone->free_area[order].free_list[migratetype]);
+out:
+	zone->free_area[order].nr_free++;
+	
+}
+
+////////////////////////////////////
 
 void print_free_list(){
 	int i,j;

@@ -745,11 +745,17 @@ int powOrder(int Order){
 	return result;
 }
 
-void COMEX_init_ENV(unsigned int PID){
+void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long endAddr){
 
-	COMEX_Ready = 1;
+	pgd_t *pgd;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *ptep, pte;
+	spinlock_t *ptl;
+	struct page *page;
+
 	COMEX_PID = PID;
-	
+
 	COMEX_task_struct = pid_task(find_vpid(COMEX_PID), PIDTYPE_PID);
 	COMEX_mm = COMEX_task_struct->mm;
 	COMEX_vma = COMEX_mm->mmap;
@@ -757,7 +763,33 @@ void COMEX_init_ENV(unsigned int PID){
 	INIT_LIST_HEAD(&keep_for_COMEX_pages);
 	INIT_LIST_HEAD(&pages_to_free);
 	
-	printk(KERN_INFO "COMEX_init_ENV: COMEX_Ready = %d COMEX_PID %d\n", COMEX_Ready, COMEX_PID);
+	printk(KERN_INFO "%s: COMEX_Ready %d COMEX_PID %d\n", __FUNCTION__, COMEX_Ready, COMEX_PID);
+	printk(KERN_INFO "%s: startAddr %lu endAddr %lu\n", __FUNCTION__, startAddr, endAddr);
+	
+	while(startAddr <=  endAddr){
+		page = NULL;		
+		pgd = pgd_offset(COMEX_mm, startAddr);
+		if (pgd_none(*pgd) || pgd_bad(*pgd)){
+			printk(KERN_INFO "PGD bug\n");
+		}	
+		pud = pud_offset(pgd, startAddr);
+		if (pud_none(*pud) || pud_bad(*pud)){
+			printk(KERN_INFO "PUD bug\n");
+		}
+		pmd = pmd_offset(pud, startAddr);
+		if (pmd_none(*pmd) || pmd_bad(*pmd)){
+			printk(KERN_INFO "PMD bug\n");
+		}	
+		
+		ptep = pte_offset_map_lock(COMEX_mm, pmd, startAddr, &ptl);
+		pte = *ptep;
+		pte_unmap_unlock(ptep, ptl);
+		
+		printk(KERN_INFO "Phy_Addr %lu", (unsigned long)pte.pte);
+		startAddr += 4096;
+	}
+	
+	COMEX_Ready = 1;
 	COMEX_signal(-1);	// Finish Init signal
 }
 EXPORT_SYMBOL(COMEX_init_ENV);

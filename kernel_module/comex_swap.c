@@ -75,14 +75,15 @@ static void prepare_COMEX_shrink_page_list(unsigned long COMEX_Address,unsigned 
 		
 		if(pte_present(pte) == 1){
 			list_move(&page->lru, &page_list);
-			printk(KERN_INFO "COMEX kernel module: pte_present(pte) = %d\n", pte_present(pte));
+			//printk(KERN_INFO "COMEX kernel module: pte_present(pte) = %d\n", pte_present(pte));
+			printk(KERN_INFO "Addr %lu, mem_map %p", COMEX_Address, page);
 		}
 		else{
 			printk(KERN_INFO "COMEX kernel module: pte_present(pte) = %d\n", pte_present(pte));
 		}		
 		COMEX_Address += 4096;
 	}
-	COMEX_shrink_page_list(&page_list, vma);
+	//COMEX_shrink_page_list(&page_list, vma);
 }
 
 unsigned long getParamFromPacketData(struct sk_buff *skb, int Position){
@@ -124,8 +125,12 @@ static void nl_recv_msg(struct sk_buff *skb)
 	switch(cmdNumber){
 		case 0:
 			COMEX_PID = nlh->nlmsg_pid; 								/*pid of sending process, COMEX */
-			COMEX_init_ENV((unsigned int)COMEX_PID);
-			printk(KERN_INFO "%s: Finish Initialize\n", __FUNCTION__);
+		
+			COMEX_Address = getParamFromPacketData(skb, 1);
+			COMEX_Address_End = getParamFromPacketData(skb, 2);
+			
+			printk(KERN_INFO "%s: Command %lu Start = %lu End = %lu\n", __FUNCTION__, cmdNumber, COMEX_Address, COMEX_Address_End);
+			COMEX_init_ENV((unsigned int)COMEX_PID, COMEX_Address, COMEX_Address_End);
 			break;
 			
 		case 100:

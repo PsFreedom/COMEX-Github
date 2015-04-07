@@ -37,7 +37,7 @@ void sendNLMssge(char* myMessage){
 int getOrder(int number_of_pages){
 	int size=1, Order=0;
 	
-	while(size <= number_of_pages){
+	while(size <= number_of_pages && Order <= 10){
 		size = size*2;
 		Order++;
 	}
@@ -100,6 +100,7 @@ int main(int argc, char *argv[]){
 	int i;
 	unsigned long N_Pages, totalInt, SumContent;
 	char strArea_start[30], strArea_end[30], myMessage[50];
+	struct page *testPage, *testPage2;
 	
 	N_Pages = strtol(argv[1], NULL, 10);	// Number of Pages as input.
 	totalInt = N_Pages*1024;				// int => 4 bytes * 1024 = 1 page
@@ -122,20 +123,24 @@ int main(int argc, char *argv[]){
 	init_Netlink();
 	init_SignalHandler();
 	
-	sendNLMssge("0");
+	sprintf(strArea_start, "%lu", COMEX_Area);
+	sprintf(strArea_end, "%lu", &COMEX_Area[totalInt-1]);
+	sprintf(myMessage, "%d %s %s", 0, strArea_start, strArea_end);
+	printf("%s\n", myMessage);
+	sendNLMssge(myMessage);
 	
-//	sprintf(strArea_start, "%lu", COMEX_Area);
-//	sprintf(strArea_end, "%lu", &COMEX_Area[totalInt-1]);
-//	sprintf(myMessage, "%d %s %s", 100, strArea_start, strArea_end);
-//	printf("%s\n", myMessage);
-//	sendNLMssge(myMessage);
+//	testPage = __rmqueue_smallest(3);
+//	testPage2 = __rmqueue_smallest(2);
+//	print_free_list();
+//	__free_one_page(testPage, 3);
+//	print_free_list();
+//	__free_one_page(testPage2, 2);
+//	print_free_list();
 	
-/*	print_free_list();
-	__rmqueue_smallest(3);
-	print_free_list();
-	__rmqueue_smallest(2);
-	print_free_list();
-*/
+//	for(i=0; i<32; i++){
+//		printf("%d > %d \n", i, page_order(testPage+i));
+//	}
+
 	
 	while(1){
 		SumContent = 0;
