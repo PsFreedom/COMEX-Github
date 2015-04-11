@@ -58,7 +58,9 @@
 #include <linux/rcupdate.h>	//rcu_read_lock
 #include <linux/sched.h>	//find_task_by_pid_type
 #include <linux/uaccess.h>
+
 #define SIG_TEST 44 /* we define our own signal, hard coded since SIGRTMIN is different in user and in kernel space */ 
+#define X86PageSize 4096
 
 enum lumpy_mode {
 	LUMPY_MODE_NONE,
@@ -699,6 +701,7 @@ unsigned int COMEX_Ready = 0;
 unsigned int COMEX_Waiting_for_Reply = 0;
 unsigned long COMEX_nr_anon;
 unsigned long COMEX_nr_file;
+unsigned long *comexLookUP;
 
 struct task_struct *COMEX_task_struct;
 struct mm_struct *COMEX_mm;
@@ -745,51 +748,157 @@ int powOrder(int Order){
 	return result;
 }
 
-void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long endAddr){
+pte_t pageWalk_getPTE(unsigned long Addr){
 
 	pgd_t *pgd;
 	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *ptep, pte;
 	spinlock_t *ptl;
-	struct page *page;
+	
+	pgd = pgd_offset(COMEX_mm, Addr);
+	if (pgd_none(*pgd) || pgd_bad(*pgd)){
+		printk(KERN_INFO "PGD bug\n");
+	}	
+	pud = pud_offset(pgd, Addr);
+	if (pud_none(*pud) || pud_bad(*pud)){
+		printk(KERN_INFO "PUD bug\n");
+	}
+	pmd = pmd_offset(pud, Addr);
+	if (pmd_none(*pmd) || pmd_bad(*pmd)){
+		printk(KERN_INFO "PMD bug\n");
+	}	
+	
+	ptep = pte_offset_map_lock(COMEX_mm, pmd, Addr, &ptl);
+	pte = *ptep;
+	pte_unmap_unlock(ptep, ptl);
+	
+	return pte;
+}
+
+unsigned long getPhyAddrLookUP(unsigned long entry){
+	return entry >> 28;
+}
+
+unsigned int getPageNumber(unsigned long entry){
+	return (unsigned int)(entry & 0xFFFFFF0) >> 4;
+}
+
+unsigned int getSizeOrder(unsigned long entry){
+	return (unsigned int)(entry & 0xF); 
+}
+
+void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long endAddr){
+
+	unsigned long *allPhyAddr;
+	unsigned int *allPageNO;
+	unsigned int pageNO, nPages, i, j;
+	
+	unsigned int n_conPages, currentOrder, availPages, entry;
+	pte_t pte;
 
 	COMEX_PID = PID;
-
 	COMEX_task_struct = pid_task(find_vpid(COMEX_PID), PIDTYPE_PID);
 	COMEX_mm = COMEX_task_struct->mm;
-	COMEX_vma = COMEX_mm->mmap;
-	
+	COMEX_vma = COMEX_mm->mmap;	
 	INIT_LIST_HEAD(&keep_for_COMEX_pages);
 	INIT_LIST_HEAD(&pages_to_free);
 	
+	nPages = ((endAddr-startAddr) / X86PageSize) +1;
 	printk(KERN_INFO "%s: COMEX_Ready %d COMEX_PID %d\n", __FUNCTION__, COMEX_Ready, COMEX_PID);
-	printk(KERN_INFO "%s: startAddr %lu endAddr %lu\n", __FUNCTION__, startAddr, endAddr);
+	printk(KERN_INFO "%s: startAddr %lu endAddr %lu\n", __FUNCTION__, startAddr, endAddr);	
+	printk(KERN_INFO "%s: nPages %d\n", __FUNCTION__, nPages);	
 	
+	////////////////////	COMEX Look UP	//////////////////// Begin
+	
+	allPhyAddr = (unsigned long *)vmalloc(sizeof(unsigned long)*nPages);
+	allPageNO = (unsigned int *)vmalloc(sizeof(unsigned int)*nPages);	
+	pageNO = 0;
 	while(startAddr <=  endAddr){
-		page = NULL;		
-		pgd = pgd_offset(COMEX_mm, startAddr);
-		if (pgd_none(*pgd) || pgd_bad(*pgd)){
-			printk(KERN_INFO "PGD bug\n");
-		}	
-		pud = pud_offset(pgd, startAddr);
-		if (pud_none(*pud) || pud_bad(*pud)){
-			printk(KERN_INFO "PUD bug\n");
-		}
-		pmd = pmd_offset(pud, startAddr);
-		if (pmd_none(*pmd) || pmd_bad(*pmd)){
-			printk(KERN_INFO "PMD bug\n");
-		}	
+		pte = pageWalk_getPTE(startAddr);
 		
-		ptep = pte_offset_map_lock(COMEX_mm, pmd, startAddr, &ptl);
-		pte = *ptep;
-		pte_unmap_unlock(ptep, ptl);
+		allPhyAddr[pageNO] = pte.pte;
+		allPageNO[pageNO] = pageNO;
 		
-		printk(KERN_INFO "Phy_Addr %lu", (unsigned long)pte.pte);
-		startAddr += 4096;
+		printk(KERN_INFO "%s: PhyAddr %lu OrigOrder %u", __FUNCTION__, allPhyAddr[pageNO], allPageNO[pageNO]);	
+
+		startAddr += X86PageSize;
+		pageNO++;
 	}
 	
-	COMEX_Ready = 1;
+	entry = 0;
+	for(i=0; i<nPages; i++){
+		n_conPages = 0;
+		currentOrder = 0;
+		availPages = 1;
+		for(j=i; j<nPages; j++){
+			if(allPhyAddr[j] != allPhyAddr[i] + (j-i)*X86PageSize){
+				break;
+			}
+			if(n_conPages >= availPages){
+				availPages = availPages*2;
+				currentOrder++;
+			}
+			n_conPages++;
+		}		
+		
+		if(n_conPages == availPages){
+			entry++;
+		}
+		else{
+			availPages = availPages/2;
+			currentOrder--;
+			entry++;
+		}
+		i = i + availPages-1;
+	}
+	
+	comexLookUP = (unsigned long *)vmalloc(sizeof(unsigned long)*entry);
+	entry = 0;
+	for(i=0; i<nPages; i++){
+		n_conPages = 0;
+		currentOrder = 0;
+		availPages = 1;
+		for(j=i; j<nPages; j++){
+			if(allPhyAddr[j] != allPhyAddr[i] + (j-i)*X86PageSize){
+				break;
+			}
+			if(n_conPages >= availPages){
+				availPages = availPages*2;
+				currentOrder++;
+			}
+			n_conPages++;
+		}		
+		
+		if(n_conPages == availPages){
+			comexLookUP[entry] = (allPhyAddr[i] >> 12) << 28;			
+			comexLookUP[entry] = comexLookUP[entry] | (allPageNO[i] << 4);
+			comexLookUP[entry] = comexLookUP[entry] | currentOrder;			
+			entry++;
+		}
+		else{
+			availPages = availPages/2;
+			currentOrder--;
+			comexLookUP[entry] = (allPhyAddr[i] >> 12) << 28;			
+			comexLookUP[entry] = comexLookUP[entry] | (allPageNO[i] << 4);
+			comexLookUP[entry] = comexLookUP[entry] | currentOrder;		
+			entry++;
+		}
+		i = i + availPages-1;
+	}
+	
+	printk(KERN_INFO "----------------------------------");
+	for(i=0; i<entry; i++){
+		printk(KERN_INFO "%s: PhyAddr %lX ", __FUNCTION__, allPhyAddr[i]);
+		printk(KERN_INFO "%s: comexLookUP %lX No. %u Size %u", __FUNCTION__, getPhyAddrLookUP(comexLookUP[i]), getPageNumber(comexLookUP[i]), getSizeOrder(comexLookUP[i]));	
+	}
+	printk(KERN_INFO "----------------------------------");
+	vfree(allPhyAddr);
+	vfree(allPageNO);
+	
+	////////////////////	COMEX Look UP	//////////////////// End
+	
+//	COMEX_Ready = 1;
 	COMEX_signal(-1);	// Finish Init signal
 }
 EXPORT_SYMBOL(COMEX_init_ENV);
@@ -864,7 +973,7 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 		
 		if (!trylock_page(COMEX_Page)){						// Lock COMEX's page descriptor
 			availPages--;
-			startAddr = startAddr + 4096;
+			startAddr = startAddr + X86PageSize;
 			printk(KERN_INFO "%s: Cannot lock COMEX_Page <<<<<<<<<<<<< \n", __FUNCTION__);
 			continue;
 		}		
@@ -897,7 +1006,7 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 		
 		availPages--;
 		COMEX_pages_list_size--;
-		startAddr = startAddr + 4096;
+		startAddr = startAddr + X86PageSize;
 	}	
 
 	putback_lru_pages(keepZone, &keepSc, 0, 0, &pages_to_free);
