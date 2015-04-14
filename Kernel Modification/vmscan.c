@@ -788,6 +788,58 @@ unsigned int getSizeOrder(unsigned long entry){
 	return (unsigned int)(entry & 0xF); 
 }
 
+void myQuickSort(unsigned long arr[], int left, int right) {
+      int i = left, j = right;
+      unsigned long tmp;
+      unsigned long pivot = arr[(left + right) / 2];
+ 
+      /* partition */
+      while (i <= j) {
+            while (arr[i] < pivot)
+                  i++;
+            while (arr[j] > pivot)
+                  j--;
+            if (i <= j) {
+                  tmp = arr[i];
+                  arr[i] = arr[j];
+                  arr[j] = tmp;
+                  i++;
+                  j--;
+            }
+      };
+ 
+      /* recursion */
+      if (left < j)
+            myQuickSort(arr, left, j);
+      if (i < right)
+            myQuickSort(arr, i, right);
+}
+
+int binSearchCOMEXLookUP(unsigned long value, unsigned int head, unsigned int tail){
+	unsigned int middle;
+	unsigned long firstVal, lastVal;
+	
+	while(tail >= head){
+		
+		middle = (head+tail)/2;
+		firstVal = getPhyAddrLookUP(comexLookUP[middle]);
+		lastVal = getPhyAddrLookUP(comexLookUP[middle]) + (powOrder(getSizeOrder(comexLookUP[middle]))-1);	
+//		printk(KERN_INFO "%s: Val %lx Size %u Number %u", __FUNCTION__, getPhyAddrLookUP(comexLookUP[middle]), getSizeOrder(comexLookUP[middle]), getPageNumber(comexLookUP[middle]));
+//		printk(KERN_INFO "%s: firstVal %lx lastVal %lx", __FUNCTION__, firstVal, lastVal);
+		if(value >= firstVal && value <= lastVal){
+			return getPageNumber(comexLookUP[middle]) + (value - firstVal);
+		}
+		else if(lastVal < value){
+			head = middle+1;
+		}
+		else{
+			tail = middle-1;
+		}
+	}
+	
+	return -1;
+}
+
 void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long endAddr){
 
 	unsigned long *allPhyAddr;
@@ -820,7 +872,7 @@ void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long end
 		allPhyAddr[pageNO] = pte.pte;
 		allPageNO[pageNO] = pageNO;
 		
-		printk(KERN_INFO "%s: PhyAddr %lu OrigOrder %u", __FUNCTION__, allPhyAddr[pageNO], allPageNO[pageNO]);	
+		printk(KERN_INFO "%s: PhyAddr %lX OrigOrder %u", __FUNCTION__, allPhyAddr[pageNO], allPageNO[pageNO]);	
 
 		startAddr += X86PageSize;
 		pageNO++;
@@ -891,6 +943,15 @@ void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long end
 	for(i=0; i<entry; i++){
 		printk(KERN_INFO "%s: PhyAddr %lX ", __FUNCTION__, allPhyAddr[i]);
 		printk(KERN_INFO "%s: comexLookUP %lX No. %u Size %u", __FUNCTION__, getPhyAddrLookUP(comexLookUP[i]), getPageNumber(comexLookUP[i]), getSizeOrder(comexLookUP[i]));	
+	}
+	printk(KERN_INFO "----------------------------------");
+	myQuickSort(comexLookUP,0,entry-1);
+	for(i=0; i<entry; i++){
+		printk(KERN_INFO "%s: comexLookUP[i] %lX ", __FUNCTION__, comexLookUP[i]);
+	}
+	for(i=0; i<entry; i++){
+		n_conPages = binSearchCOMEXLookUP(getPhyAddrLookUP(comexLookUP[i])+1, 0, entry-1);
+		printk(KERN_INFO "%s: binSearchCOMEXLookUP %d ", __FUNCTION__, n_conPages);
 	}
 	printk(KERN_INFO "----------------------------------");
 	vfree(allPhyAddr);
