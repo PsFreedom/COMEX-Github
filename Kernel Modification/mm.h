@@ -21,6 +21,7 @@ struct file_ra_state;
 struct user_struct;
 struct writeback_control;
 
+
 #ifndef CONFIG_DISCONTIGMEM          /* Don't use mapnrs, do it properly */
 extern unsigned long max_mapnr;
 #endif
@@ -1032,8 +1033,16 @@ struct shrinker {
 extern void register_shrinker(struct shrinker *);
 extern void unregister_shrinker(struct shrinker *);
 
+extern unsigned int COMEX_Ready;
+extern unsigned long *comexLookUP;
+extern unsigned int totalLookUPEntry;
+extern int binSearchCOMEXLookUP(unsigned long value);
+extern unsigned long getPhyAddrLookUP(unsigned long entry);
+extern unsigned int getPageNumber(unsigned long entry);
+extern unsigned int getSizeOrder(unsigned long entry);
 extern void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long endAddr);
 extern void COMEX_Terminate(void);
+extern void COMEX_signal(int sigN);
 extern void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order);
 extern unsigned long COMEX_shrink_page_list(struct list_head *page_list, struct vm_area_struct *COMEX_vma);
 

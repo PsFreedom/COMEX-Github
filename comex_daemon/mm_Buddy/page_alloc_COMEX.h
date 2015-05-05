@@ -170,13 +170,14 @@ __page_find_buddy(struct page *page, unsigned long page_idx, unsigned int order)
  * -- wli
  */
 
-static inline void __free_one_page(struct page *page, unsigned int order)
+static inline void __free_one_page(int pageNum, unsigned int order)
 {
 	unsigned long page_idx;
 	unsigned long combined_idx;
 	int migratetype = 0;
 	struct zone *zone = COMEXzone;
 	struct page *buddy;
+	struct page *page = &(COMEXpages[pageNum]);
 
 //	if (unlikely(PageCompound(page)))
 //		if (unlikely(destroy_compound_page(page, order)))

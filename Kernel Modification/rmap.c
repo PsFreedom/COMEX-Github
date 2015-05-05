@@ -1089,11 +1089,13 @@ int COMEX_PTE_unmap(struct page *page, struct vm_area_struct *vma,
 		     unsigned long address, enum ttu_flags flags, pte_t pte_to_set, struct page *COMEX_Page)
 {
 	struct mm_struct *mm = vma->vm_mm;
+	struct task_struct *Process_owner = mm->owner;
 	pte_t *pte;
 	pte_t pteval, pte_keep12bits;
 	spinlock_t *ptl;
 	int ret = 0;
 	
+	printk(KERN_INFO "%s: Under COMEX process %d\n", __FUNCTION__, Process_owner->pid);
 	pte = page_check_address(page, mm, address, &ptl, 0);
 	if (!pte)
 		goto out;

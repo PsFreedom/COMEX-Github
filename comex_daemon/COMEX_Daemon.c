@@ -30,7 +30,7 @@ void sendNLMssge(char* myMessage){
     msg.msg_namelen = sizeof(dest_addr);
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;	
-	printf("Sending message to kernel module\n");
+//	printf("Sending message to kernel module\n");
     sendmsg(sock_fd, &msg, 0);
 }
 
@@ -46,15 +46,22 @@ int getOrder(int number_of_pages){
 
 void receiveData(int n, siginfo_t *info, void *unused) {
 	int cmd_number = info->si_int;
-	int *startAddr, *endAddr, Order;
+	int *startAddr, *endAddr, Order, pageNOtoFree;
 	char myMessage[50];
 	struct page *pPage;
 	
-	if(cmd_number < 0){
-		printf("received value %i\n", cmd_number);
+	if(cmd_number < -15){
+		pageNOtoFree = cmd_number/(-16);
+		pageNOtoFree = pageNOtoFree - 1;
+		
+		__free_one_page(pageNOtoFree, 0);
+		printf("Free page %i\n", pageNOtoFree);
+	}
+	else if(cmd_number < 0){
+//		printf("received value %i\n", cmd_number);
 	}
 	else{
-		printf("received value %i\n", cmd_number);
+//		printf("received value %i\n", cmd_number);
 		Order = getOrder(cmd_number);
 		pPage = __rmqueue_smallest(Order);
 		sprintf(myMessage, "%d %lu %d", 200, &COMEX_Area[(pPage->pageNO)*1024], Order);
@@ -140,15 +147,14 @@ int main(int argc, char *argv[]){
 //	for(i=0; i<32; i++){
 //		printf("%d > %d \n", i, page_order(testPage+i));
 //	}
-
 	
 	while(1){
 		SumContent = 0;
-		for(i=0; i<totalInt; i++){
-			SumContent = SumContent + COMEX_Area[i];
-		}	
+//		for(i=0; i<totalInt; i++){
+//			SumContent = SumContent + COMEX_Area[i];
+//		}	
 		printf("SumContent = %lu\n", SumContent);
-		sleep(15);
+		sleep(6000);
 	}
 	
 	close(sock_fd);

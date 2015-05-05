@@ -699,6 +699,7 @@ int COMEX_pages_list_size = 0;
 unsigned int COMEX_PID = 0;
 unsigned int COMEX_Ready = 0;
 unsigned int COMEX_Waiting_for_Reply = 0;
+unsigned int totalLookUPEntry = 0;
 unsigned long COMEX_nr_anon;
 unsigned long COMEX_nr_file;
 unsigned long *comexLookUP;
@@ -815,17 +816,17 @@ void myQuickSort(unsigned long arr[], int left, int right) {
             myQuickSort(arr, i, right);
 }
 
-int binSearchCOMEXLookUP(unsigned long value, unsigned int head, unsigned int tail){
-	unsigned int middle;
+int binSearchCOMEXLookUP(unsigned long value){
+	int head, middle, tail;
 	unsigned long firstVal, lastVal;
 	
+	head = 0;
+	tail = totalLookUPEntry-1;
+//	printk(KERN_INFO "%s , Search Addr %lX", __FUNCTION__, value);	
 	while(tail >= head){
-		
 		middle = (head+tail)/2;
 		firstVal = getPhyAddrLookUP(comexLookUP[middle]);
 		lastVal = getPhyAddrLookUP(comexLookUP[middle]) + (powOrder(getSizeOrder(comexLookUP[middle]))-1);	
-//		printk(KERN_INFO "%s: Val %lx Size %u Number %u", __FUNCTION__, getPhyAddrLookUP(comexLookUP[middle]), getSizeOrder(comexLookUP[middle]), getPageNumber(comexLookUP[middle]));
-//		printk(KERN_INFO "%s: firstVal %lx lastVal %lx", __FUNCTION__, firstVal, lastVal);
 		if(value >= firstVal && value <= lastVal){
 			return getPageNumber(comexLookUP[middle]) + (value - firstVal);
 		}
@@ -836,7 +837,6 @@ int binSearchCOMEXLookUP(unsigned long value, unsigned int head, unsigned int ta
 			tail = middle-1;
 		}
 	}
-	
 	return -1;
 }
 
@@ -867,17 +867,12 @@ void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long end
 	allPageNO = (unsigned int *)vmalloc(sizeof(unsigned int)*nPages);	
 	pageNO = 0;
 	while(startAddr <=  endAddr){
-		pte = pageWalk_getPTE(startAddr);
-		
+		pte = pageWalk_getPTE(startAddr);		
 		allPhyAddr[pageNO] = pte.pte;
 		allPageNO[pageNO] = pageNO;
-		
-		printk(KERN_INFO "%s: PhyAddr %lX OrigOrder %u", __FUNCTION__, allPhyAddr[pageNO], allPageNO[pageNO]);	
-
 		startAddr += X86PageSize;
 		pageNO++;
 	}
-	
 	entry = 0;
 	for(i=0; i<nPages; i++){
 		n_conPages = 0;
@@ -892,8 +887,7 @@ void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long end
 				currentOrder++;
 			}
 			n_conPages++;
-		}		
-		
+		}				
 		if(n_conPages == availPages){
 			entry++;
 		}
@@ -903,8 +897,8 @@ void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long end
 			entry++;
 		}
 		i = i + availPages-1;
-	}
-	
+	}	
+	totalLookUPEntry = entry;
 	comexLookUP = (unsigned long *)vmalloc(sizeof(unsigned long)*entry);
 	entry = 0;
 	for(i=0; i<nPages; i++){
@@ -920,8 +914,7 @@ void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long end
 				currentOrder++;
 			}
 			n_conPages++;
-		}		
-		
+		}			
 		if(n_conPages == availPages){
 			comexLookUP[entry] = (allPhyAddr[i] >> 12) << 28;			
 			comexLookUP[entry] = comexLookUP[entry] | (allPageNO[i] << 4);
@@ -938,28 +931,13 @@ void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long end
 		}
 		i = i + availPages-1;
 	}
-	
-	printk(KERN_INFO "----------------------------------");
-	for(i=0; i<entry; i++){
-		printk(KERN_INFO "%s: PhyAddr %lX ", __FUNCTION__, allPhyAddr[i]);
-		printk(KERN_INFO "%s: comexLookUP %lX No. %u Size %u", __FUNCTION__, getPhyAddrLookUP(comexLookUP[i]), getPageNumber(comexLookUP[i]), getSizeOrder(comexLookUP[i]));	
-	}
-	printk(KERN_INFO "----------------------------------");
 	myQuickSort(comexLookUP,0,entry-1);
-	for(i=0; i<entry; i++){
-		printk(KERN_INFO "%s: comexLookUP[i] %lX ", __FUNCTION__, comexLookUP[i]);
-	}
-	for(i=0; i<entry; i++){
-		n_conPages = binSearchCOMEXLookUP(getPhyAddrLookUP(comexLookUP[i])+1, 0, entry-1);
-		printk(KERN_INFO "%s: binSearchCOMEXLookUP %d ", __FUNCTION__, n_conPages);
-	}
-	printk(KERN_INFO "----------------------------------");
 	vfree(allPhyAddr);
 	vfree(allPageNO);
 	
 	////////////////////	COMEX Look UP	//////////////////// End
 	
-//	COMEX_Ready = 1;
+	COMEX_Ready = 1;
 	COMEX_signal(-1);	// Finish Init signal
 }
 EXPORT_SYMBOL(COMEX_init_ENV);
@@ -1011,7 +989,7 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 	pte_t *ptep, COMEX_pte;
 	spinlock_t *ptl;
 	
-	printk(KERN_INFO "%s: startAddr=%lu Order=%d\n", __FUNCTION__, startAddr, Order);
+//	printk(KERN_INFO "%s: startAddr=%lu Order=%d\n", __FUNCTION__, startAddr, Order);
 
 	while (!list_empty(&keep_for_COMEX_pages) && availPages>0 ){		// 
 																		// *** contiguous pages optimization ***
@@ -1073,11 +1051,11 @@ void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
 	putback_lru_pages(keepZone, &keepSc, 0, 0, &pages_to_free);
 	if(!list_empty(&keep_for_COMEX_pages)){
 		COMEX_signal(COMEX_pages_list_size);
-		printk(KERN_INFO "%s: Not Empty %d\n", __FUNCTION__, COMEX_pages_list_size);
+//		printk(KERN_INFO "%s: Not Empty %d\n", __FUNCTION__, COMEX_pages_list_size);
 	}
 	else{
 		COMEX_Waiting_for_Reply = 0;
-		printk(KERN_INFO "%s: Empty %d\n", __FUNCTION__, COMEX_pages_list_size);
+//		printk(KERN_INFO "%s: Empty %d\n", __FUNCTION__, COMEX_pages_list_size);
 	}	
 	COMEX_signal(-3);
 }
