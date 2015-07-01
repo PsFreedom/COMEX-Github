@@ -6,6 +6,7 @@
 #include <signal.h>
 
 #include <sys/socket.h>
+#include <sys/mman.h>
 #include <linux/netlink.h>
 
 #include "mm_Buddy/page_alloc_COMEX.h"
@@ -33,24 +34,24 @@ void sendNLMssge(char* myMessage){
 //	printf("Sending message to kernel module\n");
     sendmsg(sock_fd, &msg, 0);
 }
-
+/*
 int getOrder(int number_of_pages){
 	int size=1, Order=0;
 	
-	while(size <= number_of_pages && Order <= 10){
+	while(size < number_of_pages && Order <= 10){
 		size = size*2;
 		Order++;
 	}
 	return Order;
 }
-
+*/
 void receiveData(int n, siginfo_t *info, void *unused) {
 	int cmd_number = info->si_int;
-	int *startAddr, *endAddr, Order, pageNOtoFree;
+	int Order, pageNOtoFree;
 	char myMessage[50];
 	struct page *pPage;
-	
-	if(cmd_number < -15){
+/*	
+	if(cmd_number < -15){		//	Free page from kernel
 		pageNOtoFree = cmd_number/(-16);
 		pageNOtoFree = pageNOtoFree - 1;
 		
@@ -58,15 +59,20 @@ void receiveData(int n, siginfo_t *info, void *unused) {
 		printf("Free page %i\n", pageNOtoFree);
 	}
 	else if(cmd_number < 0){
-//		printf("received value %i\n", cmd_number);
+		printf("received value %i\n", cmd_number);
+			// 	-1	Finish initialization.
+			//	-2	Terminate.
+			//	-3 	Finish write to COMEX area.
 	}
-	else{
-//		printf("received value %i\n", cmd_number);
+	else{		// 	Request for page
+		printf("received value %i\n", cmd_number);
 		Order = getOrder(cmd_number);
 		pPage = __rmqueue_smallest(Order);
 		sprintf(myMessage, "%d %lu %d", 200, &COMEX_Area[(pPage->pageNO)*1024], Order);
 		sendNLMssge(myMessage);
 	}
+*/	
+	printf("received value %i\n", cmd_number);
 }
 
 void init_SignalHandler(){
@@ -107,13 +113,8 @@ int main(int argc, char *argv[]){
 	int i;
 	unsigned long N_Pages, totalInt, SumContent;
 	char strArea_start[30], strArea_end[30], myMessage[50];
-	struct page *testPage, *testPage2;
-	
-	N_Pages = strtol(argv[1], NULL, 10);	// Number of Pages as input.
-	totalInt = N_Pages*1024;				// int => 4 bytes * 1024 = 1 page
-	
-	COMEX_Area = (int*)malloc(sizeof(int)*totalInt);	// Mem allocation
-	if(!mlock(COMEX_Area, sizeof(int)*totalInt)){		// Pin down
+
+	if(!mlockall(MCL_FUTURE)){
 		printf("Mlock success\n");
 	}
 	else{
@@ -121,12 +122,20 @@ int main(int argc, char *argv[]){
 		return -1;
 	}
 	
+	N_Pages = strtol(argv[1], NULL, 10);	// Number of Pages as input.
+	N_Pages = N_Pages / 1024;
+	printf("N_Pages %d \n", N_Pages);
+	N_Pages = N_Pages * 1024;
+	printf("N_Pages %d \n", N_Pages);
+	totalInt = N_Pages*1024;				// int => 4 bytes * 1024 = 1 page
+	
+	COMEX_Area = (int*)malloc(sizeof(int)*totalInt);	// Mem allocation
 	for(i=0; i<totalInt; i++){		// Init all page to 0
 		COMEX_Area[i] = 0;
 	}
 	
 	printf("%s\n", __FUNCTION__);	
-	initBuddy(N_Pages);
+//	initBuddy(N_Pages);
 	init_Netlink();
 	init_SignalHandler();
 	
@@ -135,26 +144,14 @@ int main(int argc, char *argv[]){
 	sprintf(myMessage, "%d %s %s", 0, strArea_start, strArea_end);
 	printf("%s\n", myMessage);
 	sendNLMssge(myMessage);
-	
-//	testPage = __rmqueue_smallest(3);
-//	testPage2 = __rmqueue_smallest(2);
-//	print_free_list();
-//	__free_one_page(testPage, 3);
-//	print_free_list();
-//	__free_one_page(testPage2, 2);
-//	print_free_list();
-	
-//	for(i=0; i<32; i++){
-//		printf("%d > %d \n", i, page_order(testPage+i));
-//	}
-	
+
 	while(1){
 		SumContent = 0;
-//		for(i=0; i<totalInt; i++){
-//			SumContent = SumContent + COMEX_Area[i];
-//		}	
+		for(i=0; i<totalInt; i++){
+			SumContent = SumContent + COMEX_Area[i];
+		}
 		printf("SumContent = %lu\n", SumContent);
-		sleep(6000);
+		sleep(300);
 	}
 	
 	close(sock_fd);

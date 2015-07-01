@@ -962,6 +962,46 @@ void page_remove_rmap(struct page *page)
 	 */
 }
 
+int COMEX_PTE_unmap(struct page *old_page, struct vm_area_struct *old_vma,
+		     		unsigned long old_address, pte_t *old_ptePointer)
+{
+	struct mm_struct *old_mm = old_vma->vm_mm;
+	pte_t pteval;
+	
+	clear_page_mlock(old_page);	
+	
+	flush_cache_page(old_vma, old_address, page_to_pfn(old_page));
+	pteval = ptep_clear_flush_notify(old_vma, old_address, old_ptePointer);
+	
+	update_hiwater_rss(old_mm);
+	if(PageHWPoison(old_page))
+		dec_mm_counter(old_mm, MM_ANONPAGES);
+	
+	return 0;
+}
+
+void COMEX_PTE_mapping(	struct page *COMEX_page, struct vm_area_struct *old_vma, 
+						unsigned long old_address, pte_t *old_pte, pte_t COMEX_pte, pte_t old_Orig_PTE)
+{
+	
+	struct mm_struct *old_mm = old_vma->vm_mm;
+	unsigned long new_address;
+	pte_t PTE_to_set;
+	pte_t PTE_keep_old_12;
+	
+	PTE_keep_old_12.pte = old_Orig_PTE.pte & 4095;
+	PTE_to_set.pte = COMEX_pte.pte >> 12;
+	PTE_to_set.pte = PTE_to_set.pte << 12;
+	PTE_to_set.pte = PTE_to_set.pte | 32;
+	PTE_to_set.pte = PTE_to_set.pte | PTE_keep_old_12.pte;
+	
+	set_pte_at_notify(old_mm, old_address, old_pte, PTE_to_set);
+
+	new_address = vma_address(COMEX_page, old_vma);
+	update_mmu_cache(old_vma, new_address, old_pte);
+	page_add_anon_rmap(COMEX_page, old_vma, new_address);
+}
+
 /*
  * Subfunctions of try_to_unmap: try_to_unmap_one called
  * repeatedly from either try_to_unmap_anon or try_to_unmap_file.
@@ -997,171 +1037,6 @@ int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 			goto out_unmap;
 		}
   	}
-
-	/* Nuke the page table entry. */
-	flush_cache_page(vma, address, page_to_pfn(page));
-	pteval = ptep_clear_flush_notify(vma, address, pte);
-
-	/* Move the dirty bit to the physical page now the pte is gone. */
-	if (pte_dirty(pteval))
-		set_page_dirty(page);
-
-	/* Update high watermark before we lower rss */
-	update_hiwater_rss(mm);
-
-	if (PageHWPoison(page) && !(flags & TTU_IGNORE_HWPOISON)) {
-		if (PageAnon(page))
-			dec_mm_counter(mm, MM_ANONPAGES);
-		else
-			dec_mm_counter(mm, MM_FILEPAGES);
-		set_pte_at(mm, address, pte,
-				swp_entry_to_pte(make_hwpoison_entry(page)));
-	} else if (PageAnon(page)) {
-		swp_entry_t entry = { .val = page_private(page) };
-
-		if (PageSwapCache(page)) {
-			/*
-			 * Store the swap location in the pte.
-			 * See handle_pte_fault() ...
-			 */
-			if (swap_duplicate(entry) < 0) {
-				set_pte_at(mm, address, pte, pteval);
-				ret = SWAP_FAIL;
-				goto out_unmap;
-			}
-			if (list_empty(&mm->mmlist)) {
-				spin_lock(&mmlist_lock);
-				if (list_empty(&mm->mmlist))
-					list_add(&mm->mmlist, &init_mm.mmlist);
-				spin_unlock(&mmlist_lock);
-			}
-			dec_mm_counter(mm, MM_ANONPAGES);
-			inc_mm_counter(mm, MM_SWAPENTS);
-		} else if (PAGE_MIGRATION) {
-			/*
-			 * Store the pfn of the page in a special migration
-			 * pte. do_swap_page() will wait until the migration
-			 * pte is removed and then restart fault handling.
-			 */
-			BUG_ON(TTU_ACTION(flags) != TTU_MIGRATION);
-			entry = make_migration_entry(page, pte_write(pteval));
-		}
-		set_pte_at(mm, address, pte, swp_entry_to_pte(entry));
-		BUG_ON(pte_file(*pte));
-	} else if (PAGE_MIGRATION && (TTU_ACTION(flags) == TTU_MIGRATION)) {
-		/* Establish migration entry for a file page */
-		swp_entry_t entry;
-		entry = make_migration_entry(page, pte_write(pteval));
-		set_pte_at(mm, address, pte, swp_entry_to_pte(entry));
-	} else
-		dec_mm_counter(mm, MM_FILEPAGES);
-
-	page_remove_rmap(page);
-	page_cache_release(page);
-
-out_unmap:
-	pte_unmap_unlock(pte, ptl);
-out:
-	return ret;
-
-out_mlock:
-	pte_unmap_unlock(pte, ptl);
-
-
-	/*
-	 * We need mmap_sem locking, Otherwise VM_LOCKED check makes
-	 * unstable result and race. Plus, We can't wait here because
-	 * we now hold anon_vma->lock or mapping->i_mmap_lock.
-	 * if trylock failed, the page remain in evictable lru and later
-	 * vmscan could retry to move the page to unevictable lru if the
-	 * page is actually mlocked.
-	 */
-	if (down_read_trylock(&vma->vm_mm->mmap_sem)) {
-		if (vma->vm_flags & VM_LOCKED) {
-			mlock_vma_page(page);
-			ret = SWAP_MLOCK;
-		}
-		up_read(&vma->vm_mm->mmap_sem);
-	}
-	return ret;
-}
-int COMEX_PTE_unmap(struct page *page, struct vm_area_struct *vma,
-		     unsigned long address, enum ttu_flags flags, pte_t pte_to_set, struct page *COMEX_Page)
-{
-	struct mm_struct *mm = vma->vm_mm;
-	struct task_struct *Process_owner = mm->owner;
-	pte_t *pte;
-	pte_t pteval, pte_keep12bits;
-	spinlock_t *ptl;
-	int ret = 0;
-	
-	printk(KERN_INFO "%s: Under COMEX process %d\n", __FUNCTION__, Process_owner->pid);
-	pte = page_check_address(page, mm, address, &ptl, 0);
-	if (!pte)
-		goto out;
-	
-	ret = 1;
-	pte_keep12bits.pte = pte->pte & 4095;
-	pte_to_set.pte = pte_to_set.pte >> 12;
-	pte_to_set.pte = pte_to_set.pte << 12;
-	pte_to_set.pte = pte_to_set.pte | 32;
-	pte_to_set.pte = pte_to_set.pte | pte_keep12bits.pte;
-
-	/* Nuke the page table entry. */
-	flush_cache_page(vma, address, page_to_pfn(page));	// Safe
-	pteval = ptep_clear_flush(vma, address, pte);
-	do_page_add_anon_rmap(COMEX_Page, vma, address, 0);
-
-	/* Move the dirty bit to the physical page now the pte is gone. */
-	if (pte_dirty(pteval))		// Take
-		set_page_dirty(page);	// Safe
-
-	/* Update high watermark before we lower rss */
-	update_hiwater_rss(mm);		// Safe
-
-	set_pte_at_notify(mm, address, pte, pte_to_set);
-	update_mmu_cache(vma, address, pte);
-
-	page_remove_rmap(page);
-	page_cache_release(page);
-
-out_unmap:
-	pte_unmap_unlock(pte, ptl);
-out:
-	return ret;
-}
-
-int COMEX_try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
-		     unsigned long address, enum ttu_flags flags)
-{
-	struct mm_struct *mm = vma->vm_mm;
-	pte_t *pte;
-	pte_t pteval;
-	spinlock_t *ptl;
-	int ret = SWAP_AGAIN;
-
-	pte = page_check_address(page, mm, address, &ptl, 0);
-	if (!pte)
-		goto out;
-
-	/*
-	 * If the page is mlock()d, we cannot swap it out.
-	 * If it's recently referenced (perhaps page_referenced
-	 * skipped over this mm) then we should reactivate it.
-	 */
-//	if (!(flags & TTU_IGNORE_MLOCK)) {
-//		if (vma->vm_flags & VM_LOCKED)
-//			goto out_mlock;
-//
-//		if (TTU_ACTION(flags) == TTU_MUNLOCK)
-//			goto out_unmap;
-//	}
-//	if (!(flags & TTU_IGNORE_ACCESS)) {
-//		if (ptep_clear_flush_young_notify(vma, address, pte)) {
-//			ret = SWAP_FAIL;
-//			goto out_unmap;
-//		}
-// 	}
 
 	/* Nuke the page table entry. */
 	flush_cache_page(vma, address, page_to_pfn(page));
@@ -1434,51 +1309,6 @@ static int try_to_unmap_anon(struct page *page, enum ttu_flags flags)
 	page_unlock_anon_vma(anon_vma);
 	return ret;
 }
-static int COMEX_try_to_unmap_anon(struct page *page, enum ttu_flags flags, struct vm_area_struct *COMEX_vma)
-{
-	struct anon_vma *anon_vma;
-	struct anon_vma_chain *avc;
-	int ret = SWAP_AGAIN;
-
-	printk(KERN_INFO "COMEX_try_to_unmap_anon: COMEX_vma enable.\n");
-
-	anon_vma = page_lock_anon_vma(page);
-	if (!anon_vma)
-		return ret;
-
-	list_for_each_entry(avc, &anon_vma->head, same_anon_vma) {
-		struct vm_area_struct *vma = avc->vma;
-		unsigned long address;
-
-		/*
-		 * During exec, a temporary VMA is setup and later moved.
-		 * The VMA is moved under the anon_vma lock but not the
-		 * page tables leading to a race where migration cannot
-		 * find the migration ptes. Rather than increasing the
-		 * locking requirements of exec(), migration skips
-		 * temporary VMAs until after exec() completes.
-		 */
-		if (PAGE_MIGRATION && (flags & TTU_MIGRATION) &&
-				is_vma_temporary_stack(vma))
-			continue;
-
-		address = vma_address(page, vma);
-		if (address == -EFAULT)
-			continue;
-		if(COMEX_vma != vma){
-			ret = COMEX_try_to_unmap_one(page, vma, address, flags);
-		}
-		else{
-			printk(KERN_INFO "COMEX_try_to_unmap_anon: This is COMEX_vma. Do not unmap.\n");
-			ret = SWAP_SUCCESS;
-		}
-		if (ret != SWAP_AGAIN || !page_mapped(page))
-			break;
-	}
-
-	page_unlock_anon_vma(anon_vma);
-	return ret;
-}
 
 /**
  * try_to_unmap_file - unmap/unlock file page using the object-based rmap method
@@ -1615,22 +1445,6 @@ int try_to_unmap(struct page *page, enum ttu_flags flags)
 		ret = try_to_unmap_ksm(page, flags);
 	else if (PageAnon(page))
 		ret = try_to_unmap_anon(page, flags);
-	else
-		ret = try_to_unmap_file(page, flags);
-	if (ret != SWAP_MLOCK && !page_mapped(page))
-		ret = SWAP_SUCCESS;
-	return ret;
-}
-int COMEX_try_to_unmap(struct page *page, enum ttu_flags flags, struct vm_area_struct *COMEX_vma)
-{
-	int ret;
-
-	BUG_ON(!PageLocked(page));
-
-	if (unlikely(PageKsm(page)))
-		ret = try_to_unmap_ksm(page, flags);
-	else if (PageAnon(page))
-		ret = COMEX_try_to_unmap_anon(page, flags, COMEX_vma);
 	else
 		ret = try_to_unmap_file(page, flags);
 	if (ret != SWAP_MLOCK && !page_mapped(page))
@@ -1824,3 +1638,4 @@ void hugepage_add_new_anon_rmap(struct page *page,
 	__hugepage_set_anon_rmap(page, vma, address, 1);
 }
 #endif /* CONFIG_HUGETLB_PAGE */
+

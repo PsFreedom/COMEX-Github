@@ -198,13 +198,15 @@ enum ttu_flags {
 };
 #define TTU_ACTION(x) ((x) & TTU_ACTION_MASK)
 
-int try_to_unmap(struct page *, enum ttu_flags flags);
-int COMEX_try_to_unmap(struct page *, enum ttu_flags flags, struct vm_area_struct *);
 
+int COMEX_PTE_unmap(struct page *old_page, struct vm_area_struct *old_vma,
+		     		unsigned long old_address, pte_t *old_ptePointer);
+void COMEX_PTE_mapping(	struct page *COMEX_page, struct vm_area_struct *old_vma, 
+						unsigned long old_address, pte_t *old_pte, pte_t COMEX_pte, pte_t old_Orig_PTE);
+
+int try_to_unmap(struct page *, enum ttu_flags flags);
 int try_to_unmap_one(struct page *, struct vm_area_struct *,
 			unsigned long address, enum ttu_flags flags);
-int COMEX_PTE_unmap(struct page *, struct vm_area_struct *,
-			unsigned long address, enum ttu_flags flags, pte_t pte_to_set, struct page *COMEX_Page);
 
 /*
  * Called from mm/filemap_xip.c to unmap empty zero page

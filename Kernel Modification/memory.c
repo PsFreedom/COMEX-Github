@@ -897,6 +897,7 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
 	pte_t *pte;
 	spinlock_t *ptl;
 	int rss[NR_MM_COUNTERS];
+	
 	int COMEXTmp;
 	unsigned long COMEXTmpAddr;
 
@@ -956,18 +957,16 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
 					mark_page_accessed(page);
 				rss[MM_FILEPAGES]--;
 			}
-			page_remove_rmap(page);
-			if(page_mapcount(page) == 1 && atomic_read(&page->_count) == 2 && COMEX_Ready == 1){
+			
+			if(COMEX_Ready == 1 && page_mapcount(page)==2 && atomic_read(&page->_count)==2){
 				COMEXTmpAddr = (COMEXTmpAddr << 16) >> 28;
 				COMEXTmp = binSearchCOMEXLookUP(COMEXTmpAddr);
 				if(COMEXTmp >= 0){
-					COMEXTmp = COMEXTmp + 1;
-					COMEXTmp = COMEXTmp << 4;
-					COMEXTmp = COMEXTmp * (-1);
+					COMEX_free_to_Buddy(COMEXTmp, 0);
 					printk(KERN_INFO "%s: No. %d >> page_mapcount == %d, page->_count == %d", __FUNCTION__, COMEXTmp, page_mapcount(page), atomic_read(&page->_count));
-					COMEX_signal(COMEXTmp);
 				}
 			}
+			page_remove_rmap(page);
 			if (unlikely(page_mapcount(page) < 0))
 				print_bad_pte(vma, addr, ptent, page);
 			tlb_remove_page(tlb, page);
@@ -996,6 +995,9 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
 	add_mm_rss_vec(mm, rss);
 	arch_leave_lazy_mmu_mode();
 	pte_unmap_unlock(pte - 1, ptl);
+	
+	if(COMEX_Ready == 1)
+		print_free_blocks();
 
 	return addr;
 }

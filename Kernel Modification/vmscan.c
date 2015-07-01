@@ -59,8 +59,12 @@
 #include <linux/sched.h>	//find_task_by_pid_type
 #include <linux/uaccess.h>
 
+//#define COMEX_set_page_private(page, v)       ((page)->private = (v))
+
 #define SIG_TEST 44 /* we define our own signal, hard coded since SIGRTMIN is different in user and in kernel space */ 
 #define X86PageSize 4096
+#define COMEX_MAX_ORDER 11
+#define Biggest_Group 1024
 
 enum lumpy_mode {
 	LUMPY_MODE_NONE,
@@ -695,23 +699,42 @@ static noinline_for_stack void free_page_list(struct list_head *free_pages)
 
 //////////////////// COMEX ////////////////////
 
-int COMEX_pages_list_size = 0;
 unsigned int COMEX_PID = 0;
 unsigned int COMEX_Ready = 0;
-unsigned int COMEX_Waiting_for_Reply = 0;
 unsigned int totalLookUPEntry = 0;
-unsigned long COMEX_nr_anon;
-unsigned long COMEX_nr_file;
+unsigned long COMEX_start_addr;
 unsigned long *comexLookUP;
 
 struct task_struct *COMEX_task_struct;
 struct mm_struct *COMEX_mm;
 struct vm_area_struct *COMEX_vma;
-struct zone *keepZone;
-struct scan_control keepSc;
 
-LIST_HEAD(keep_for_COMEX_pages);
-LIST_HEAD(pages_to_free);
+static spinlock_t COMEX_Buddy_lock; 
+
+struct COMEX_free_area {
+	struct list_head	free_list[1];
+	unsigned long		nr_free;
+};
+
+typedef struct Dummy_zone {
+	struct COMEX_free_area free_area[COMEX_MAX_ORDER];
+} COMEX_Zone;
+
+COMEX_Zone *COMEX_Buddy_Zone;
+
+typedef struct Dummy_page {
+	unsigned long pageNO;
+	atomic_t _count;
+	atomic_t _mapcount;
+	unsigned long private;
+	struct list_head lru;
+	
+	bool isRemote;
+	struct page *pageDesc;
+	
+} COMEX_page;
+
+COMEX_page *COMEX_Buddy_page;
 
 void COMEX_signal(int sigN){
 	struct siginfo info;
@@ -737,6 +760,27 @@ void COMEX_signal(int sigN){
 	if (ret < 0) {
 		printk("error sending signal\n");
 	}
+}
+
+/*
+ * At what user virtual address is page expected in @vma?
+ * Returns virtual address or -EFAULT if page's index/offset is not
+ * within the range mapped the @vma.
+ */
+static inline unsigned long
+vma_address(struct page *page, struct vm_area_struct *vma)
+{
+	pgoff_t pgoff = page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
+	unsigned long address;
+
+	if (unlikely(is_vm_hugetlb_page(vma)))
+		pgoff = page->index << huge_page_order(page_hstate(page));
+	address = vma->vm_start + ((pgoff - vma->vm_pgoff) << PAGE_SHIFT);
+	if (unlikely(address < vma->vm_start || address >= vma->vm_end)) {
+		/* page should be within @vma mapping range */
+		return -EFAULT;
+	}
+	return address;
 }
 
 int powOrder(int Order){
@@ -840,26 +884,247 @@ int binSearchCOMEXLookUP(unsigned long value){
 	return -1;
 }
 
+
+static inline void COMEX_ClearPageBuddy(COMEX_page *page){
+//	VM_BUG_ON(!PageBuddy(page));
+	atomic_set(&page->_mapcount, -1);
+}
+static inline void COMEX_rmv_page_order(COMEX_page *page){
+	COMEX_ClearPageBuddy(page);
+	set_page_private(page, 0);
+}
+
+static inline void COMEX_SetPageBuddy(COMEX_page *page)
+{
+//	VM_BUG_ON(atomic_read(&page->_mapcount) != -1);
+	atomic_set(&page->_mapcount, (-128));
+}
+static inline void COMEX_set_page_order(COMEX_page *page, int order)
+{
+	set_page_private(page, order);
+	COMEX_SetPageBuddy(page);
+}
+
+static inline void COMEX_expand(COMEX_Zone *zone, COMEX_page *page,	
+	int low, int high, struct COMEX_free_area *area,int migratetype)
+{
+	unsigned long size = 1 << high;
+
+	while (high > low) {
+		area--;
+		high--;
+		size >>= 1;
+//		VM_BUG_ON(bad_range(zone, &page[size]));
+		list_add(&page[size].lru, &area->free_list[migratetype]);
+		area->nr_free++;
+		COMEX_set_page_order(&page[size], high);
+	}
+}
+
+unsigned long COMEX_page_to_pfn(COMEX_page *page){
+	return page->pageNO;
+}
+
+static inline int COMEX_PageBuddy(COMEX_page *page)
+{
+	return atomic_read(&page->_mapcount) == (-128);
+}
+
+static inline unsigned long COMEX_page_order(COMEX_page *page)
+{
+	return page->private;
+}
+
+static inline int COMEX_page_is_buddy(COMEX_page *page, COMEX_page *buddy, int order)
+{
+	if (COMEX_PageBuddy(buddy) && COMEX_page_order(buddy) == order) {
+		return 1;
+	}
+	return 0;
+}
+
+static inline COMEX_page *
+COMEX_page_find_buddy(COMEX_page *page, unsigned long page_idx, unsigned int order)
+{
+	unsigned long buddy_idx = page_idx ^ (1 << order);
+
+	return page + (buddy_idx - page_idx);
+}
+
+static inline unsigned long
+COMEX_find_combined_index(unsigned long page_idx, unsigned int order)
+{
+	return (page_idx & ~(1 << order));
+}
+
+static inline void COMEX_free_one_page(unsigned long inPageNO, unsigned int order)
+{
+	unsigned long page_idx;
+	unsigned long combined_idx;
+	int migratetype = 0;
+	COMEX_page *buddy;
+	COMEX_page *page = &COMEX_Buddy_page[inPageNO];
+	COMEX_Zone *zone = COMEX_Buddy_Zone;
+
+	printk(KERN_INFO "%s: PageNO %lu\n", __FUNCTION__, page->pageNO);
+	page_idx = COMEX_page_to_pfn(page) & ((1 << COMEX_MAX_ORDER) - 1);
+
+	while (order < COMEX_MAX_ORDER-1) {
+		buddy = COMEX_page_find_buddy(page, page_idx, order);
+		if (!COMEX_page_is_buddy(page, buddy, order))
+			break;
+
+		/* Our buddy is free, merge with it and move up one order. */
+		list_del(&buddy->lru);
+		zone->free_area[order].nr_free--;
+		COMEX_rmv_page_order(buddy);
+		combined_idx = COMEX_find_combined_index(page_idx, order);
+		page = page + (combined_idx - page_idx);
+		page_idx = combined_idx;
+		order++;
+	}
+	COMEX_set_page_order(page, order);
+
+	/*
+	 * If this is not the largest possible page, check if the buddy
+	 * of the next-highest order is free. If it is, it's possible
+	 * that pages are being freed that will coalesce soon. In case,
+	 * that is happening, add the free page to the tail of the list
+	 * so it's less likely to be used soon and more likely to be merged
+	 * as a higher order page
+	 */
+	if ((order < COMEX_MAX_ORDER-2) && pfn_valid_within(page_to_pfn(buddy))) {
+		COMEX_page *higher_page, *higher_buddy;
+		combined_idx = COMEX_find_combined_index(page_idx, order);
+		higher_page = page + combined_idx - page_idx;
+		higher_buddy = COMEX_page_find_buddy(higher_page, combined_idx, order + 1);
+		if (COMEX_page_is_buddy(higher_page, higher_buddy, order + 1)) {
+			list_add_tail(&page->lru,
+				&zone->free_area[order].free_list[migratetype]);
+			goto out;
+		}
+	}
+
+	list_add(&page->lru, &zone->free_area[order].free_list[migratetype]);
+out:
+	zone->free_area[order].nr_free++;
+	
+}
+
+/*
+ * Go through the free lists for the given migratetype and remove
+ * the smallest available page from the freelists
+ */
+static inline
+unsigned long COMEX_rmqueue_smallest(unsigned int order)
+{
+	COMEX_Zone *zone = COMEX_Buddy_Zone;
+	int migratetype = 0;
+	
+	unsigned int current_order;
+	struct COMEX_free_area * area;
+	COMEX_page *page;
+
+	/* Find a page of the appropriate size in the preferred list */
+	for (current_order = order; current_order < COMEX_MAX_ORDER; ++current_order) {
+		area = &(zone->free_area[current_order]);
+		if (list_empty(&area->free_list[migratetype]))
+			continue;
+
+		page = list_entry(area->free_list[migratetype].next, COMEX_page, lru);
+		list_del(&page->lru);
+		COMEX_rmv_page_order(page);
+		area->nr_free--;
+		COMEX_expand(zone, page, order, current_order, area, migratetype);
+		return page->pageNO + 1;
+	}
+
+	return 0;
+}
+
+void print_free_blocks(){
+	int i;
+	
+	for(i=0; i<COMEX_MAX_ORDER; i++){
+		printk(KERN_INFO "%s: Order %d - %lu\n", __FUNCTION__, i, COMEX_Buddy_Zone->free_area[i].nr_free);
+	}
+	printk(KERN_INFO "%s: \n", __FUNCTION__);
+}
+
 void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long endAddr){
 
-	unsigned long *allPhyAddr;
+	unsigned long *allPhyAddr, testPage[10], tmpStartAddr;
 	unsigned int *allPageNO;
-	unsigned int pageNO, nPages, i, j;
-	
+	unsigned int pageNO, nPages, i, j;	
 	unsigned int n_conPages, currentOrder, availPages, entry;
+	
+	struct page *COMEXpageDesc;
+	
+	pgd_t *COMEX_pgd;
+	pud_t *COMEX_pud;
+	pmd_t *COMEX_pmd;
+	pte_t *COMEX_ptep, COMEX_pte;
+	spinlock_t *COMEX_ptl;
 	pte_t pte;
 
 	COMEX_PID = PID;
 	COMEX_task_struct = pid_task(find_vpid(COMEX_PID), PIDTYPE_PID);
 	COMEX_mm = COMEX_task_struct->mm;
 	COMEX_vma = COMEX_mm->mmap;	
-	INIT_LIST_HEAD(&keep_for_COMEX_pages);
-	INIT_LIST_HEAD(&pages_to_free);
+	COMEX_start_addr = startAddr;
+	tmpStartAddr = startAddr;
 	
 	nPages = ((endAddr-startAddr) / X86PageSize) +1;
 	printk(KERN_INFO "%s: COMEX_Ready %d COMEX_PID %d\n", __FUNCTION__, COMEX_Ready, COMEX_PID);
 	printk(KERN_INFO "%s: startAddr %lu endAddr %lu\n", __FUNCTION__, startAddr, endAddr);	
-	printk(KERN_INFO "%s: nPages %d\n", __FUNCTION__, nPages);	
+	printk(KERN_INFO "%s: nPages %d\n", __FUNCTION__, nPages);
+	
+	////////////////////	Init COMEX Buddy System	//////////////////// 
+	
+	COMEX_Buddy_lock = SPIN_LOCK_UNLOCKED;
+	
+	//COMEX_Zone *COMEX_Buddy_Zone; COMEX_MAX_ORDER
+	//COMEX_page *COMEX_Buddy_page;
+	
+	COMEX_Buddy_Zone = (COMEX_Zone *)vmalloc(sizeof(COMEX_Zone));
+	COMEX_Buddy_page = (COMEX_page *)vmalloc(sizeof(COMEX_page)*nPages);
+	
+	for(i=0; i < COMEX_MAX_ORDER; i++){
+		COMEX_Buddy_Zone->free_area[i].nr_free = 0;
+		INIT_LIST_HEAD(&(COMEX_Buddy_Zone->free_area[i].free_list[0]));
+	}
+	for(i=0; i < nPages; i++){
+		COMEX_Buddy_page[i].pageNO = i;
+		COMEX_Buddy_page[i].private = COMEX_MAX_ORDER-1;
+		COMEX_Buddy_page[i].isRemote = false;
+		INIT_LIST_HEAD(&(COMEX_Buddy_page[i].lru));
+		
+		COMEX_pgd = pgd_offset(COMEX_mm, tmpStartAddr);
+		if (pgd_none(*COMEX_pgd) || pgd_bad(*COMEX_pgd)){
+			printk(KERN_INFO "PGD bug\n");
+		}	
+		COMEX_pud = pud_offset(COMEX_pgd, tmpStartAddr);
+		if (pud_none(*COMEX_pud) || pud_bad(*COMEX_pud)){
+			printk(KERN_INFO "PUD bug\n");
+		}
+		COMEX_pmd = pmd_offset(COMEX_pud, tmpStartAddr);
+		if (pmd_none(*COMEX_pmd) || pmd_bad(*COMEX_pmd)){
+			printk(KERN_INFO "PMD bug\n");
+		}
+		COMEX_ptep = pte_offset_map_lock(COMEX_mm, COMEX_pmd, tmpStartAddr, &COMEX_ptl);
+		COMEX_pte = *COMEX_ptep;
+		COMEXpageDesc = pte_page(COMEX_pte);
+		COMEX_Buddy_page[i].pageDesc = COMEXpageDesc;
+//		printk(KERN_INFO " %s - count %d mapCount %d\n",  __FUNCTION__, atomic_read(&COMEXpageDesc->_count), page_mapcount(COMEXpageDesc));
+		pte_unmap_unlock(COMEX_ptep, COMEX_ptl);
+		
+		if(i%Biggest_Group == 0){
+			list_add_tail(&(COMEX_Buddy_page[i].lru), &(COMEX_Buddy_Zone->free_area[COMEX_MAX_ORDER-1].free_list[0]));
+			COMEX_Buddy_Zone->free_area[COMEX_MAX_ORDER-1].nr_free++;
+		}
+		
+		tmpStartAddr = tmpStartAddr + X86PageSize;
+	}
 	
 	////////////////////	COMEX Look UP	//////////////////// Begin
 	
@@ -950,116 +1215,126 @@ void COMEX_Terminate(){
 }
 EXPORT_SYMBOL(COMEX_Terminate);
 
-/*
- * At what user virtual address is page expected in @vma?
- * Returns virtual address or -EFAULT if page's index/offset is not
- * within the range mapped the @vma.
- */
-static inline unsigned long
-vma_address(struct page *page, struct vm_area_struct *vma)
-{
-	pgoff_t pgoff = page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
-	unsigned long address;
-
-	if (unlikely(is_vm_hugetlb_page(vma)))
-		pgoff = page->index << huge_page_order(page_hstate(page));
-	address = vma->vm_start + ((pgoff - vma->vm_pgoff) << PAGE_SHIFT);
-	if (unlikely(address < vma->vm_start || address >= vma->vm_end)) {
-		/* page should be within @vma mapping range */
-		return -EFAULT;
-	}
-	return address;
+unsigned long COMEX_get_from_Buddy(unsigned int order){
+	unsigned long pageNO = 0;
+	
+	spin_lock(&COMEX_Buddy_lock);
+	pageNO = COMEX_rmqueue_smallest(order);
+	spin_unlock(&COMEX_Buddy_lock);
+	
+	printk(KERN_INFO "%s: Allocate %lu\n", __FUNCTION__, pageNO);
+	
+	if(pageNO > 0)
+		return COMEX_start_addr + (pageNO-1)*X86PageSize;
+	
+	return 0;
 }
 
-static noinline_for_stack void
-putback_lru_pages(struct zone *zone, struct scan_control *sc,
-				unsigned long nr_anon, unsigned long nr_file,
-				struct list_head *page_list);
+unsigned long COMEX_get_from_Remote(unsigned int order){
+	unsigned long pageNO = 0;
+	
+	return 0;
+} 
 
-void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order){
+void COMEX_free_to_Buddy(unsigned long pageNO, unsigned int order){
+
+	spin_lock(&COMEX_Buddy_lock);
+	COMEX_free_one_page(pageNO, order);
+	spin_unlock(&COMEX_Buddy_lock);
+	
+	printk(KERN_INFO "%s: Free %lu\n", __FUNCTION__, pageNO);	
+}
+
+int COMEX_move_to_COMEX(struct page *old_page){
+	
+	unsigned long COMEX_address;
+	struct page *new_page;
 	struct anon_vma *anon_vma;
 	struct anon_vma_chain *avc;
-	struct page *page, *COMEX_Page;
-	unsigned long address;
-	int availPages = powOrder(Order);	// availPages from COMEX
 	
-	pgd_t *pgd;
-	pud_t *pud;
-	pmd_t *pmd;
-	pte_t *ptep, COMEX_pte;
-	spinlock_t *ptl;
+	pgd_t *COMEX_pgd;
+	pud_t *COMEX_pud;
+	pmd_t *COMEX_pmd;
+	pte_t *COMEX_ptep, COMEX_pte, *old_ptePointer, old_pte;
+	spinlock_t *COMEX_ptl, *old_ptl;
 	
-//	printk(KERN_INFO "%s: startAddr=%lu Order=%d\n", __FUNCTION__, startAddr, Order);
-
-	while (!list_empty(&keep_for_COMEX_pages) && availPages>0 ){		// 
-																		// *** contiguous pages optimization ***
-		COMEX_Page = NULL;								// Page walk to get COMEX's page descriptor
-		pgd = pgd_offset(COMEX_mm, startAddr);
-		if (pgd_none(*pgd) || pgd_bad(*pgd)){
-			printk(KERN_INFO "PGD bug\n");
-		}	
-		pud = pud_offset(pgd, startAddr);
-		if (pud_none(*pud) || pud_bad(*pud)){
-			printk(KERN_INFO "PUD bug\n");
-		}
-		pmd = pmd_offset(pud, startAddr);
-		if (pmd_none(*pmd) || pmd_bad(*pmd)){
-			printk(KERN_INFO "PMD bug\n");
-		}		
-		ptep = pte_offset_map_lock(COMEX_mm, pmd, startAddr, &ptl);
-		COMEX_pte = *ptep;									// getting COMEX's PTE
-		COMEX_Page = pte_page(COMEX_pte);					// getting COMEX's page descriptor		
-		
-		if (!trylock_page(COMEX_Page)){						// Lock COMEX's page descriptor
-			availPages--;
-			startAddr = startAddr + X86PageSize;
-			printk(KERN_INFO "%s: Cannot lock COMEX_Page <<<<<<<<<<<<< \n", __FUNCTION__);
-			continue;
-		}		
-		page = lru_to_page(&keep_for_COMEX_pages);		//  Remove a single page from list.
-		list_del(&page->lru);
-		
-		copy_user_highpage(COMEX_Page, page, startAddr, COMEX_vma);	// Copying Content
-		__SetPageUptodate(COMEX_Page);
-		
-		anon_vma = page_lock_anon_vma(page);		// Start Getting Vaddr using RMap
-		if (!anon_vma)
-			printk(KERN_INFO "%s: get anon_vma BUG\n", __FUNCTION__);
-			
-		list_for_each_entry(avc, &anon_vma->head, same_anon_vma) {	// Every vma in Rmap		
-			struct vm_area_struct *vma = avc->vma;						
-			
-			address = vma_address(page, vma);		// Getting addr	
-			if (address == -EFAULT)
-				continue;						
-				
-			COMEX_PTE_unmap(page, vma, address, TTU_UNMAP, COMEX_pte, COMEX_Page);
-			atomic_inc(&COMEX_Page->_count);
-		}
-		page_unlock_anon_vma(anon_vma);			// End Getting Vaddr using RMap
-		
-		list_add(&page->lru, &pages_to_free);
-		pte_unmap_unlock(ptep, ptl);
-		unlock_page(COMEX_Page);
-		unlock_page(page);
-		
-		availPages--;
-		COMEX_pages_list_size--;
-		startAddr = startAddr + X86PageSize;
-	}	
-
-	putback_lru_pages(keepZone, &keepSc, 0, 0, &pages_to_free);
-	if(!list_empty(&keep_for_COMEX_pages)){
-		COMEX_signal(COMEX_pages_list_size);
-//		printk(KERN_INFO "%s: Not Empty %d\n", __FUNCTION__, COMEX_pages_list_size);
+	COMEX_address = COMEX_get_from_Buddy(0);
+	if(COMEX_address == 0){
+		COMEX_address = COMEX_get_from_Remote(0);
 	}
-	else{
-		COMEX_Waiting_for_Reply = 0;
-//		printk(KERN_INFO "%s: Empty %d\n", __FUNCTION__, COMEX_pages_list_size);
+//	printk(KERN_INFO "%s: Debug Message %lu\n", __FUNCTION__, COMEX_address);
+	
+	COMEX_pgd = pgd_offset(COMEX_mm, COMEX_address);
+	if (pgd_none(*COMEX_pgd) || pgd_bad(*COMEX_pgd)){
+//		printk(KERN_INFO "PGD bug\n");
+		return 0;
 	}	
-	COMEX_signal(-3);
+	COMEX_pud = pud_offset(COMEX_pgd, COMEX_address);
+	if (pud_none(*COMEX_pud) || pud_bad(*COMEX_pud)){
+//		printk(KERN_INFO "PUD bug\n");
+		return 0;
+	}
+	COMEX_pmd = pmd_offset(COMEX_pud, COMEX_address);
+	if (pmd_none(*COMEX_pmd) || pmd_bad(*COMEX_pmd)){
+//		printk(KERN_INFO "PMD bug\n");
+		return 0;
+	}
+	COMEX_ptep = pte_offset_map_lock(COMEX_mm, COMEX_pmd, COMEX_address, &COMEX_ptl);
+	COMEX_pte = *COMEX_ptep;
+	new_page = pte_page(COMEX_pte);
+	
+	if(!new_page){
+		pte_unmap_unlock(COMEX_ptep, COMEX_ptl);
+		return 0;
+	}
+	if(!trylock_page(new_page)){
+		pte_unmap_unlock(COMEX_ptep, COMEX_ptl);
+		return 0;
+	}
+	
+	copy_user_highpage(new_page, old_page, COMEX_address, COMEX_vma);
+	__SetPageUptodate(new_page);
+//	set_page_dirty(new_page);
+
+	anon_vma = page_lock_anon_vma(old_page);
+	if (!anon_vma){
+		printk(KERN_INFO "%s: get anon_vma BUG\n", __FUNCTION__);
+		pte_unmap_unlock(COMEX_ptep, COMEX_ptl);
+		unlock_page(new_page);
+		return 0;
+	}
+	list_for_each_entry(avc, &anon_vma->head, same_anon_vma) {
+		struct vm_area_struct *old_vma = avc->vma;			// VMA to this PageFrame.
+		struct mm_struct *old_mm = old_vma->vm_mm;
+		unsigned long old_address;
+		
+		old_address = vma_address(old_page, old_vma);		// V_Addr to this PageFrame. (to be unmapped) 
+		if (old_address == -EFAULT)
+			continue;
+			
+		old_ptePointer = page_check_address(old_page, old_mm, old_address, &old_ptl, 0);
+		if(!old_ptePointer){
+//			printk(KERN_INFO "%s: !old_ptePointer BUG\n", __FUNCTION__);
+			continue;
+		}
+		old_pte = *old_ptePointer;
+
+		COMEX_PTE_unmap(old_page, old_vma, old_address, old_ptePointer);
+		COMEX_PTE_mapping(new_page, old_vma, old_address, old_ptePointer, COMEX_pte, old_pte);
+		
+		atomic_inc(&new_page->_count);
+		page_remove_rmap(old_page);
+		page_cache_release(old_page);
+			
+		pte_unmap_unlock(old_ptePointer, old_ptl);
+	}
+	page_unlock_anon_vma(anon_vma);
+	
+	pte_unmap_unlock(COMEX_ptep, COMEX_ptl);
+	unlock_page(new_page);	
+	unlock_page(old_page);
+	return 1;
 }
-EXPORT_SYMBOL(COMEX_write_to_COMEX_area);
 
 /*
  * shrink_page_list() returns the number of reclaimed pages
@@ -1074,7 +1349,6 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 	unsigned long nr_dirty = 0;
 	unsigned long nr_congested = 0;
 	unsigned long nr_reclaimed = 0;
-	int list_update = 0;
 
 	cond_resched();
 
@@ -1148,17 +1422,16 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				goto keep_locked;
 				
 			if(COMEX_Ready == 1){
-				list_update = 1;
-				COMEX_pages_list_size++;
-				nr_reclaimed++;
-				list_add(&page->lru, &keep_for_COMEX_pages);
-				continue;
+				if(COMEX_move_to_COMEX(page))
+					goto COMEX_Out;
 			}
 			
 			if (!add_to_swap(page))
 				goto activate_locked;
 			may_enter_fs = 1;
 		}
+		
+COMEX_Out:
 
 		mapping = page_mapping(page);
 
@@ -1302,22 +1575,10 @@ keep_lumpy:
 		list_add(&page->lru, &ret_pages);
 		VM_BUG_ON(PageLRU(page) || PageUnevictable(page));
 	}
-
-	keepZone = zone;
-	keepSc.nr_scanned = sc->nr_scanned;
-	keepSc.nr_reclaimed = sc->nr_reclaimed;
-	keepSc.nr_to_reclaim = sc->nr_to_reclaim;
-	keepSc.hibernation_mode = sc->hibernation_mode;
-	keepSc.gfp_mask = sc->gfp_mask;
-	keepSc.may_writepage = sc->may_writepage;
-	keepSc.may_unmap = sc->may_unmap;
-	keepSc.may_swap = sc->may_swap;
-	keepSc.swappiness = sc->swappiness;
-	keepSc.order = sc->order;
-	keepSc.lumpy_reclaim_mode = sc->lumpy_reclaim_mode;
-	keepSc.mem_cgroup = sc->mem_cgroup;
-	keepSc.nodemask = sc->nodemask;
 	
+	if(COMEX_Ready == 1)
+		print_free_blocks();
+
 	/*
 	 * Tag a zone as congested if all the dirty pages encountered were
 	 * backed by a congested BDI. In this case, reclaimers should just
@@ -1326,309 +1587,13 @@ keep_lumpy:
 	 */
 	if (nr_dirty == nr_congested && nr_dirty != 0)
 		zone_set_flag(zone, ZONE_CONGESTED);
-	
-	free_page_list(&free_pages);
 
-	list_splice(&ret_pages, page_list);
-	count_vm_events(PGACTIVATE, pgactivate);
-	
-	if(COMEX_Ready == 1 && list_update == 1 && COMEX_Waiting_for_Reply == 0){
-		COMEX_Waiting_for_Reply = 1;
-		COMEX_signal(COMEX_pages_list_size);
-	}
-	
-	return nr_reclaimed;
-}
-
-unsigned long COMEX_shrink_page_list(struct list_head *page_list, struct vm_area_struct *COMEX_vma)
-{
-	LIST_HEAD(ret_pages);
-	LIST_HEAD(free_pages);
-	int pgactivate = 0;
-	unsigned long nr_dirty = 0;
-	unsigned long nr_congested = 0;
-	unsigned long nr_reclaimed = 0;
-
-	struct scan_control *sc;
-	struct scan_control my_sc;
-	
-	sc = &my_sc;
-	sc->nr_scanned = 0;
-	sc->nr_reclaimed = 0;
-	sc->nr_to_reclaim = 0;
-	sc->hibernation_mode = 0;
-	sc->gfp_mask = GFP_USER;
-	sc->may_writepage = 1;
-	sc->may_unmap = 1;
-	sc->may_swap = 1;
-	sc->swappiness = 1;
-	sc->order = 1;
-	sc->lumpy_reclaim_mode = LUMPY_MODE_SYNC;
-	sc->mem_cgroup = NULL;
-	sc->nodemask = NULL;
-	
-	cond_resched();
-	printk(KERN_INFO "COMEX_shrink_page_list: Inside.....with VMA\n");
-	
-	while (!list_empty(page_list)) {
-		enum page_references references;
-		struct address_space *mapping;
-		struct page *page;
-		int may_enter_fs;
-
-		printk(KERN_INFO "COMEX_shrink_page_list: Inside while loop\n");
-		
-		cond_resched();
-
-		page = lru_to_page(page_list);
-		mem_cgroup_del_lru(page);
-		ClearPageActive(page);
-		
-		list_del(&page->lru);
-
-		if (!trylock_page(page))
-			goto keep;
-
-		VM_BUG_ON(PageActive(page));
-//		VM_BUG_ON(page_zone(page) != zone);
-
-		sc->nr_scanned++;
-
-//		if (unlikely(!page_evictable(page, NULL)))
-//			goto cull_mlocked;
-
-		if (!sc->may_unmap && page_mapped(page))
-			goto keep_locked;
-
-		/* Double the slab pressure for mapped and swapcache pages */
-		if (page_mapped(page) || PageSwapCache(page))
-			sc->nr_scanned++;
-
-		may_enter_fs = (sc->gfp_mask & __GFP_FS) ||
-			(PageSwapCache(page) && (sc->gfp_mask & __GFP_IO));
-
-		if (PageWriteback(page)) {
-			/*
-			 * Synchronous reclaim is performed in two passes,
-			 * first an asynchronous pass over the list to
-			 * start parallel writeback, and a second synchronous
-			 * pass to wait for the IO to complete.  Wait here
-			 * for any page for which writeback has already
-			 * started.
-			 */
-			printk(KERN_INFO "COMEX_shrink_page_list: PageWriteback\n");
-			if (sc->lumpy_reclaim_mode == LUMPY_MODE_SYNC &&
-			    may_enter_fs)
-				wait_on_page_writeback(page);
-			else {
-				unlock_page(page);
-				goto keep_lumpy;
-			}
-		}
-
-		references = page_check_references(page, sc);
-		switch (references) {
-		case PAGEREF_ACTIVATE:
-			printk(KERN_INFO "COMEX_shrink_page_list: references -> PAGEREF_ACTIVATE\n");
-			goto activate_locked;
-		case PAGEREF_KEEP:
-			printk(KERN_INFO "COMEX_shrink_page_list: references -> PAGEREF_KEEP\n");
-			goto keep_locked;
-		case PAGEREF_RECLAIM:
-			printk(KERN_INFO "COMEX_shrink_page_list: references -> PAGEREF_RECLAIM\n");
-		case PAGEREF_RECLAIM_CLEAN:
-			printk(KERN_INFO "COMEX_shrink_page_list: references -> PAGEREF_RECLAIM_CLEAN\n"); /* try to reclaim the page below */
-		}
-
-		/*
-		 * Anonymous process memory has backing store?
-		 * Try to allocate it some swap space here.
-		 */
-		if (PageAnon(page) && !PageSwapCache(page)) {
-			printk(KERN_INFO "COMEX_shrink_page_list: PageAnon\n");
-			if (!(sc->gfp_mask & __GFP_IO))
-				goto keep_locked;
-			if (!add_to_swap(page))
-				goto activate_locked;
-			may_enter_fs = 1;
-			printk(KERN_INFO "COMEX_shrink_page_list: add_to_swap -> SUCCESS !!!\n");
-		}
-
-		mapping = page_mapping(page);
-		/*
-		 * The page is mapped into the page tables of one or more
-		 * processes. Try to unmap it here.
-		 */
-		if (page_mapped(page) && mapping) {
-			printk(KERN_INFO "COMEX_shrink_page_list: page_mapped\n"); 
-			switch (COMEX_try_to_unmap(page, TTU_UNMAP, COMEX_vma)) {
-			case SWAP_FAIL:
-				printk(KERN_INFO "COMEX_shrink_page_list: try_to_unmap -> SWAP_FAIL\n");
-				goto activate_locked;
-			case SWAP_AGAIN:
-				printk(KERN_INFO "COMEX_shrink_page_list: try_to_unmap -> SWAP_AGAIN\n");
-				goto keep_locked;
-			case SWAP_MLOCK:
-				printk(KERN_INFO "COMEX_shrink_page_list: try_to_unmap -> SWAP_MLOCK\n");
-				goto cull_mlocked;
-			case SWAP_SUCCESS:
-				printk(KERN_INFO "COMEX_shrink_page_list: try_to_unmap -> SWAP_SUCCESS\n"); /* try to free the page below */
-			}
-		}
-
-		if (PageDirty(page)) {
-			nr_dirty++;
-			printk(KERN_INFO "COMEX_shrink_page_list: PageDirty\n");
-
-			if (references == PAGEREF_RECLAIM_CLEAN)
-				goto keep_locked;
-			if (!may_enter_fs)
-				goto keep_locked;
-			if (!sc->may_writepage)
-				goto keep_locked;
-
-			/* Page is dirty, try to write it out here */
-			switch (pageout(page, mapping, sc)) {
-			case PAGE_KEEP:
-				printk(KERN_INFO "COMEX_shrink_page_list: pageout -> PAGE_KEEP\n");
-				nr_congested++;
-				goto keep_locked;
-			case PAGE_ACTIVATE:
-				printk(KERN_INFO "COMEX_shrink_page_list: pageout -> PAGE_ACTIVATE\n");
-				goto activate_locked;
-			case PAGE_SUCCESS:
-				printk(KERN_INFO "COMEX_shrink_page_list: pageout -> PAGE_SUCCESS\n");
-				if (PageWriteback(page))
-					goto keep_lumpy;
-				if (PageDirty(page))
-					goto keep;
-
-				/*
-				 * A synchronous write - probably a ramdisk.  Go
-				 * ahead and try to reclaim the page.
-				 */
-				if (!trylock_page(page))
-					goto keep;
-				if (PageDirty(page) || PageWriteback(page))
-					goto keep_locked;
-				mapping = page_mapping(page);
-			case PAGE_CLEAN:
-				printk(KERN_INFO "COMEX_shrink_page_list: pageout -> PAGE_CLEAN\n"); /* try to free the page below */
-			}
-		}
-
-		/*
-		 * If the page has buffers, try to free the buffer mappings
-		 * associated with this page. If we succeed we try to free
-		 * the page as well.
-		 *
-		 * We do this even if the page is PageDirty().
-		 * try_to_release_page() does not perform I/O, but it is
-		 * possible for a page to have PageDirty set, but it is actually
-		 * clean (all its buffers are clean).  This happens if the
-		 * buffers were written out directly, with submit_bh(). ext3
-		 * will do this, as well as the blockdev mapping.
-		 * try_to_release_page() will discover that cleanness and will
-		 * drop the buffers and mark the page clean - it can be freed.
-		 *
-		 * Rarely, pages can have buffers and no ->mapping.  These are
-		 * the pages which were not successfully invalidated in
-		 * truncate_complete_page().  We try to drop those buffers here
-		 * and if that worked, and the page is no longer mapped into
-		 * process address space (page_count == 1) it can be freed.
-		 * Otherwise, leave the page on the LRU so it is swappable.
-		 */
-		if (page_has_private(page)) {
-			printk(KERN_INFO "COMEX_shrink_page_list: page_has_private\n");
-			if (!try_to_release_page(page, sc->gfp_mask))
-				goto activate_locked;
-			if (!mapping && page_count(page) == 1) {
-				unlock_page(page);
-				if (put_page_testzero(page))
-					goto free_it;
-				else {
-					/*
-					 * rare race with speculative reference.
-					 * the speculative reference will free
-					 * this page shortly, so we may
-					 * increment nr_reclaimed here (and
-					 * leave it off the LRU).
-					 */
-					nr_reclaimed++;
-					continue;
-				}
-			}
-		}
-
-		if (!mapping || !__remove_mapping(mapping, page))
-			goto keep_locked;
-
-		/*
-		 * At this point, we have no other references and there is
-		 * no way to pick any more up (removed from LRU, removed
-		 * from pagecache). Can use non-atomic bitops now (and
-		 * we obviously don't have to worry about waking up a process
-		 * waiting on the page lock, because there are no references.
-		 */
-		__clear_page_locked(page);
-free_it:
-		printk(KERN_INFO "COMEX_shrink_page_list: free_it\n");
-		nr_reclaimed++;
-
-		/*
-		 * Is there need to periodically free_page_list? It would
-		 * appear not as the counts should be low
-		 */
-		list_add(&page->lru, &free_pages);
-		continue;
-
-cull_mlocked:
-		printk(KERN_INFO "COMEX_shrink_page_list: cull_mlocked\n");
-		if (PageSwapCache(page))
-			try_to_free_swap(page);
-		unlock_page(page);
-		putback_lru_page(page);
-		disable_lumpy_reclaim_mode(sc);
-		continue;
-
-activate_locked:
-		/* Not a candidate for swapping, so reclaim swap space. */
-		printk(KERN_INFO "COMEX_shrink_page_list: activate_locked\n");
-		if (PageSwapCache(page) && vm_swap_full())
-			try_to_free_swap(page);
-		VM_BUG_ON(PageActive(page));
-		SetPageActive(page);
-		pgactivate++;
-keep_locked:
-		printk(KERN_INFO "COMEX_shrink_page_list: keep_locked\n");
-		unlock_page(page);
-keep:
-		printk(KERN_INFO "COMEX_shrink_page_list: keep\n");
-		disable_lumpy_reclaim_mode(sc);
-keep_lumpy:
-		printk(KERN_INFO "COMEX_shrink_page_list: keep_lumpy\n");
-		list_add(&page->lru, &ret_pages);
-		VM_BUG_ON(PageLRU(page) || PageUnevictable(page));
-	}
-
-	/*
-	 * Tag a zone as congested if all the dirty pages encountered were
-	 * backed by a congested BDI. In this case, reclaimers should just
-	 * back off and wait for congestion to clear because further reclaim
-	 * will encounter the same problem
-	 */
-//	if (nr_dirty == nr_congested && nr_dirty != 0)
-//		zone_set_flag(zone, ZONE_CONGESTED);
-
-	printk(KERN_INFO "COMEX_shrink_page_list: Outside while loop\n");
 	free_page_list(&free_pages);
 
 	list_splice(&ret_pages, page_list);
 	count_vm_events(PGACTIVATE, pgactivate);
 	return nr_reclaimed;
 }
-EXPORT_SYMBOL(COMEX_shrink_page_list);
-
 //////////////////// COMEX ////////////////////
 
 /*
@@ -2108,9 +2073,6 @@ shrink_inactive_list(unsigned long nr_to_scan, struct zone *zone,
 
 	spin_unlock_irq(&zone->lru_lock);
 
-	COMEX_nr_anon = nr_anon;
-	COMEX_nr_file = nr_file;
-	
 	nr_reclaimed = shrink_page_list(&page_list, zone, sc);
 
 	/* Check if we should syncronously wait for writeback */

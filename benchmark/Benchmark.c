@@ -19,7 +19,7 @@ int main(int argc, char *argv[]){
 		for(i=0; i<totalInt; i++){
 			Mem_Area[i] = Mem_Area[i] + 1;
 		}
-		sleep(7200);
+		sleep(60);
 	}
 	
 	return 0;

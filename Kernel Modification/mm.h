@@ -1043,8 +1043,9 @@ extern unsigned int getSizeOrder(unsigned long entry);
 extern void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long endAddr);
 extern void COMEX_Terminate(void);
 extern void COMEX_signal(int sigN);
-extern void COMEX_write_to_COMEX_area(unsigned long startAddr,int Order);
-extern unsigned long COMEX_shrink_page_list(struct list_head *page_list, struct vm_area_struct *COMEX_vma);
+
+extern void COMEX_free_to_Buddy(unsigned long pageNO, unsigned int order);
+extern void print_free_blocks(void);
 
 int vma_wants_writenotify(struct vm_area_struct *vma);
 

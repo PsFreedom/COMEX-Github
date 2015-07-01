@@ -18,7 +18,7 @@
 
 struct sock *nl_sk = NULL;
 unsigned int COMEX_PID = 0;
-
+/*
 static void prepare_COMEX_shrink_page_list(unsigned long COMEX_Address,unsigned long COMEX_Address_End){
 	pgd_t *pgd;
 	pud_t *pud;
@@ -85,6 +85,7 @@ static void prepare_COMEX_shrink_page_list(unsigned long COMEX_Address,unsigned 
 	}
 	//COMEX_shrink_page_list(&page_list, vma);
 }
+*/
 
 unsigned long getParamFromPacketData(struct sk_buff *skb, int Position){
 	struct nlmsghdr *nlh = (struct nlmsghdr *)skb->data;
@@ -133,21 +134,21 @@ static void nl_recv_msg(struct sk_buff *skb)
 			COMEX_init_ENV((unsigned int)COMEX_PID, COMEX_Address, COMEX_Address_End);
 			break;
 			
-		case 100:
+/*		case 100:
 			COMEX_Address = getParamFromPacketData(skb, 1);
 			COMEX_Address_End = getParamFromPacketData(skb, 2);
 			
 			printk(KERN_INFO "%s: Command %lu Start = %lu End = %lu\n", __FUNCTION__, cmdNumber, COMEX_Address, COMEX_Address_End);
 			prepare_COMEX_shrink_page_list(COMEX_Address, COMEX_Address_End);
 			break;
-			
-		case 200:
+*/			
+/*		case 200:
 			COMEX_Address = getParamFromPacketData(skb, 1);
 			Order = getParamFromPacketData(skb, 2);
 			
 			COMEX_write_to_COMEX_area(COMEX_Address, Order);
 			break;
-			
+*/			
 		default:
 			printk(KERN_INFO "%s: No case\n", __FUNCTION__);
 	}
