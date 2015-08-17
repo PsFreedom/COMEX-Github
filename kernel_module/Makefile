@@ -1,4 +1,4 @@
-obj-m += comex_swap.o
+obj-m += comex_module.o
 
 all:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules

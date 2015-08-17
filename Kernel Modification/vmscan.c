@@ -32,6 +32,7 @@
 #include <linux/topology.h>
 #include <linux/cpu.h>
 #include <linux/cpuset.h>
+#include <linux/compaction.h>
 #include <linux/notifier.h>
 #include <linux/rwsem.h>
 #include <linux/delay.h>
@@ -40,6 +41,7 @@
 #include <linux/memcontrol.h>
 #include <linux/delayacct.h>
 #include <linux/sysctl.h>
+#include <linux/oom.h>
 
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
@@ -48,29 +50,42 @@
 
 #include "internal.h"
 
-#define CREATE_TRACE_POINTS
-#include <trace/events/vmscan.h>
-
-#include <linux/netlink.h>
+#include <linux/netlink.h>	// add for COMEX
 #include <linux/hugetlb.h> 	// add for COMEX
-#include <linux/kernel.h>
+#include <linux/kernel.h>	// add for COMEX
 #include <asm/siginfo.h>	//siginfo
 #include <linux/rcupdate.h>	//rcu_read_lock
 #include <linux/sched.h>	//find_task_by_pid_type
-#include <linux/uaccess.h>
-
-//#define COMEX_set_page_private(page, v)       ((page)->private = (v))
+#include <linux/uaccess.h>	// add for COMEX
+#include <net/sock.h>			// Netlink Socket
+#include <linux/skbuff.h>		// Netlink Socket
 
 #define SIG_TEST 44 /* we define our own signal, hard coded since SIGRTMIN is different in user and in kernel space */ 
 #define X86PageSize 4096
 #define COMEX_MAX_ORDER 11
 #define Biggest_Group 1024
+#define MAX_Remote_Nodes 1024
 
-enum lumpy_mode {
-	LUMPY_MODE_NONE,
-	LUMPY_MODE_ASYNC,
-	LUMPY_MODE_SYNC,
-};
+#define CREATE_TRACE_POINTS
+#include <trace/events/vmscan.h>
+
+/*
+ * reclaim_mode determines how the inactive list is shrunk
+ * RECLAIM_MODE_SINGLE: Reclaim only order-0 pages
+ * RECLAIM_MODE_ASYNC:  Do not block
+ * RECLAIM_MODE_SYNC:   Allow blocking e.g. call wait_on_page_writeback
+ * RECLAIM_MODE_LUMPYRECLAIM: For high-order allocations, take a reference
+ *			page from the LRU and reclaim all pages within a
+ *			naturally aligned range
+ * RECLAIM_MODE_COMPACTION: For high-order allocations, reclaim a number of
+ *			order-0 pages and then compact the zone
+ */
+typedef unsigned __bitwise__ reclaim_mode_t;
+#define RECLAIM_MODE_SINGLE		((__force reclaim_mode_t)0x01u)
+#define RECLAIM_MODE_ASYNC		((__force reclaim_mode_t)0x02u)
+#define RECLAIM_MODE_SYNC		((__force reclaim_mode_t)0x04u)
+#define RECLAIM_MODE_LUMPYRECLAIM	((__force reclaim_mode_t)0x08u)
+#define RECLAIM_MODE_COMPACTION		((__force reclaim_mode_t)0x10u)
 
 struct scan_control {
 	/* Incremented by the number of inactive pages that were scanned */
@@ -103,7 +118,7 @@ struct scan_control {
 	 * Intend to reclaim enough continuous memory rather than reclaim
 	 * enough amount of memory. i.e, mode for high order allocation.
 	 */
-	enum lumpy_mode lumpy_reclaim_mode;
+	reclaim_mode_t reclaim_mode;
 
 	/* Which cgroup do we reclaim from */
 	struct mem_cgroup *mem_cgroup;
@@ -231,8 +246,11 @@ unsigned long shrink_slab(unsigned long scanned, gfp_t gfp_mask,
 	if (scanned == 0)
 		scanned = SWAP_CLUSTER_MAX;
 
-	if (!down_read_trylock(&shrinker_rwsem))
-		return 1;	/* Assume we'll be able to shrink next time */
+	if (!down_read_trylock(&shrinker_rwsem)) {
+		/* Assume we'll be able to shrink next time */
+		ret = 1;
+		goto out;
+	}
 
 	list_for_each_entry(shrinker, &shrinker_list, list) {
 		unsigned long long delta;
@@ -283,37 +301,42 @@ unsigned long shrink_slab(unsigned long scanned, gfp_t gfp_mask,
 		shrinker->nr += total_scan;
 	}
 	up_read(&shrinker_rwsem);
+out:
+	cond_resched();
 	return ret;
 }
 
-static void set_lumpy_reclaim_mode(int priority, struct scan_control *sc,
+static void set_reclaim_mode(int priority, struct scan_control *sc,
 				   bool sync)
 {
-	enum lumpy_mode mode = sync ? LUMPY_MODE_SYNC : LUMPY_MODE_ASYNC;
+	reclaim_mode_t syncmode = sync ? RECLAIM_MODE_SYNC : RECLAIM_MODE_ASYNC;
 
 	/*
-	 * Some reclaim have alredy been failed. No worth to try synchronous
-	 * lumpy reclaim.
+	 * Initially assume we are entering either lumpy reclaim or
+	 * reclaim/compaction.Depending on the order, we will either set the
+	 * sync mode or just reclaim order-0 pages later.
 	 */
-	if (sync && sc->lumpy_reclaim_mode == LUMPY_MODE_NONE)
-		return;
+	if (COMPACTION_BUILD)
+		sc->reclaim_mode = RECLAIM_MODE_COMPACTION;
+	else
+		sc->reclaim_mode = RECLAIM_MODE_LUMPYRECLAIM;
 
 	/*
-	 * If we need a large contiguous chunk of memory, or have
-	 * trouble getting a small set of contiguous pages, we
-	 * will reclaim both active and inactive pages.
+	 * Avoid using lumpy reclaim or reclaim/compaction if possible by
+	 * restricting when its set to either costly allocations or when
+	 * under memory pressure
 	 */
 	if (sc->order > PAGE_ALLOC_COSTLY_ORDER)
-		sc->lumpy_reclaim_mode = mode;
+		sc->reclaim_mode |= syncmode;
 	else if (sc->order && priority < DEF_PRIORITY - 2)
-		sc->lumpy_reclaim_mode = mode;
+		sc->reclaim_mode |= syncmode;
 	else
-		sc->lumpy_reclaim_mode = LUMPY_MODE_NONE;
+		sc->reclaim_mode = RECLAIM_MODE_SINGLE | RECLAIM_MODE_ASYNC;
 }
 
-static void disable_lumpy_reclaim_mode(struct scan_control *sc)
+static void reset_reclaim_mode(struct scan_control *sc)
 {
-	sc->lumpy_reclaim_mode = LUMPY_MODE_NONE;
+	sc->reclaim_mode = RECLAIM_MODE_SINGLE | RECLAIM_MODE_ASYNC;
 }
 
 static inline int is_page_cache_freeable(struct page *page)
@@ -357,7 +380,7 @@ static int may_write_to_queue(struct backing_dev_info *bdi,
 static void handle_write_error(struct address_space *mapping,
 				struct page *page, int error)
 {
-	lock_page_nosync(page);
+	lock_page(page);
 	if (page_mapping(page) == mapping)
 		mapping_set_error(mapping, error);
 	unlock_page(page);
@@ -444,7 +467,7 @@ static pageout_t pageout(struct page *page, struct address_space *mapping,
 		 * first attempt to free a range of pages fails.
 		 */
 		if (PageWriteback(page) &&
-		    sc->lumpy_reclaim_mode == LUMPY_MODE_SYNC)
+		    (sc->reclaim_mode & RECLAIM_MODE_SYNC))
 			wait_on_page_writeback(page);
 
 		if (!PageWriteback(page)) {
@@ -452,7 +475,7 @@ static pageout_t pageout(struct page *page, struct address_space *mapping,
 			ClearPageReclaim(page);
 		}
 		trace_mm_vmscan_writepage(page,
-			trace_reclaim_flags(page, sc->lumpy_reclaim_mode));
+			trace_reclaim_flags(page, sc->reclaim_mode));
 		inc_zone_page_state(page, NR_VMSCAN_WRITE);
 		return PAGE_SUCCESS;
 	}
@@ -513,7 +536,7 @@ static int __remove_mapping(struct address_space *mapping, struct page *page)
 
 		freepage = mapping->a_ops->freepage;
 
-		__remove_from_page_cache(page);
+		__delete_from_page_cache(page);
 		spin_unlock_irq(&mapping->tree_lock);
 		mem_cgroup_uncharge_cache_page(page);
 
@@ -637,7 +660,7 @@ static enum page_references page_check_references(struct page *page,
 	referenced_page = TestClearPageReferenced(page);
 
 	/* Lumpy reclaim - ignore references */
-	if (sc->lumpy_reclaim_mode != LUMPY_MODE_NONE)
+	if (sc->reclaim_mode & RECLAIM_MODE_LUMPYRECLAIM)
 		return PAGEREF_RECLAIM;
 
 	/*
@@ -694,20 +717,190 @@ static noinline_for_stack void free_page_list(struct list_head *free_pages)
 		}
 	}
 
+
 	pagevec_free(&freed_pvec);
 }
 
-//////////////////// COMEX ////////////////////
 
-unsigned int COMEX_PID = 0;
+//////////////////// Global Variables ////////////////////
+
+int COMEX_PID = 0;
+int Listener_PID = 0;
 unsigned int COMEX_Ready = 0;
-unsigned int totalLookUPEntry = 0;
-unsigned long COMEX_start_addr;
-unsigned long *comexLookUP;
+unsigned int Daemon_Ready = 0;
+unsigned int Listener_Ready = 0;
 
 struct task_struct *COMEX_task_struct;
 struct mm_struct *COMEX_mm;
 struct vm_area_struct *COMEX_vma;
+
+//////////////////// COMEX Remote ////////////////////
+
+int COMEX_Node_ID = 0;
+int COMEX_Total_Nodes = 0;
+int COMEX_MAX_Buffer = 0;
+
+unsigned long COMEX_buffer_addr;
+
+int JumpThreshold = 5;
+int bufferHead = 0;
+int bufferTail = 0;
+int prevNodeID = 0;
+struct page *prevPage = NULL;
+
+int get_Frist_PID(struct page *page);
+unsigned long COMEX_get_from_Buddy(int order);
+
+typedef struct COMEX_remote_page_desc{
+	struct page *pageDesc;
+	int R_NodeID;
+	unsigned long R_PhyAddr;
+	struct list_head listPointer;
+} COMEX_R_page;
+
+typedef struct COMEX_remote_list_header{
+	struct list_head listHeader;
+	int PageCounter;	
+	int requestLock;
+} COMEX_R_Header;
+COMEX_R_Header COMEX_Freelist[MAX_Remote_Nodes];
+COMEX_R_Header COMEX_Usedlist[MAX_Remote_Nodes];
+
+typedef struct COMEX_buffer_descriptor{
+	struct page *pageDesc;
+	int isFree;
+} COMEXbuffer;
+COMEXbuffer *bufferDesc;
+
+void print_COMEX_all_Freelist(void){
+	int i;	
+	for(i=0; i<COMEX_Total_Nodes; i++){
+		printk(KERN_INFO "%s: COMEX_Freelist[%d]: %d\n", __FUNCTION__, i, COMEX_Freelist[i].PageCounter);
+	}
+}
+
+void print_COMEX_Freelist(int listNO){
+	
+	COMEX_R_page *targetPage;
+	
+	list_for_each_entry(targetPage, &COMEX_Freelist[listNO].listHeader, listPointer){
+		printk(KERN_INFO "%s: -> R_NodeID %d R_PhyAddr %lu\n", __FUNCTION__, targetPage->R_NodeID, targetPage->R_PhyAddr);
+	}
+}
+
+void COMEX_fill_R_list(COMEX_R_page *page, int listNO){
+	list_add_tail(&page->listPointer, &COMEX_Freelist[listNO].listHeader);
+	COMEX_Freelist[listNO].PageCounter++;
+}
+
+void COMEX_drain_R_list(COMEX_R_page *page, int listNO){
+	list_move_tail(&page->listPointer, &COMEX_Usedlist[listNO].listHeader);
+	COMEX_Freelist[listNO].PageCounter--;
+}
+
+int COMEX_Hash(int nodeID, int PID){
+	return ((nodeID+1)*PID*3*5*7*11)%COMEX_Total_Nodes;
+}
+
+int COMEX_move_to_Remote(struct page *page){
+
+	int i, listNO, firstPID;
+	unsigned long COMEX_address;
+	COMEX_R_page *R_page;
+	
+	firstPID = get_Frist_PID(page);
+	listNO = COMEX_Hash(COMEX_Node_ID, firstPID);	
+//	printk(KERN_INFO "%s: firstPID %d, Target %d, Page %lu", __FUNCTION__, firstPID, listNO, page);
+	for(i=0; i<JumpThreshold; i++){
+		if(COMEX_Freelist[listNO].PageCounter > 0){
+			
+			if(bufferDesc[bufferTail].isFree == 0){
+				COMEX_address = COMEX_buffer_addr + bufferTail*X86PageSize;
+				copy_user_highpage(bufferDesc[bufferTail].pageDesc, page, COMEX_address, COMEX_vma);
+				R_page = list_first_entry(&COMEX_Freelist[listNO].listHeader, COMEX_R_page, listPointer);			
+//				COMEX_drain_R_list(R_page, listNO);
+				
+//				bufferDesc[bufferTail].isFree = 1;
+				bufferTail++;
+			}
+			else{
+				return -1;
+			}
+			
+			if(bufferTail > 1){
+				if(prevPage+1 != page || prevNodeID != listNO){
+					// ship
+					// Head
+					// Tail - 2
+					printk(KERN_INFO "%s: ---> Ship Frac Head %d Tail %d", __FUNCTION__, bufferHead, bufferTail-1);				
+					bufferHead = bufferTail-1;
+					bufferTail = bufferTail;					
+				}
+				if(bufferTail == COMEX_MAX_Buffer){
+					// ship
+					// Head
+					// Tail - 1
+					printk(KERN_INFO "%s: ---> Ship END  Head %d Tail %d", __FUNCTION__, bufferHead, bufferTail-1);				
+					bufferHead = 0;
+					bufferTail = 0;
+				}				
+			}
+			printk(KERN_INFO "%s: bufferHead %d bufferTail %d", __FUNCTION__, bufferHead, bufferTail);
+			
+			prevPage = page;
+			prevNodeID = listNO;
+//			return listNO;
+			return -1;
+		}
+		else if(COMEX_Freelist[listNO].requestLock == 0){
+			COMEX_Freelist[listNO].requestLock = 1;
+			COMEX_signal(listNO);
+		}
+		listNO = COMEX_Hash(listNO, firstPID);
+	}
+		
+	return -1;
+}
+
+void COMEX_recv_fill(int RemoteID, unsigned long RemoteAddr, int nPages){
+	int i;
+	COMEX_R_page *rPage;
+	
+	if(COMEX_Ready == 1){
+		for(i=0; i<nPages; i++){
+			rPage = (COMEX_R_page *)vmalloc(sizeof(COMEX_R_page));
+		
+			rPage->pageDesc = NULL;
+			rPage->R_NodeID = RemoteID;
+			rPage->R_PhyAddr = RemoteAddr + i*X86PageSize;
+			INIT_LIST_HEAD(&rPage->listPointer);
+		
+			COMEX_fill_R_list(rPage, RemoteID);
+		}
+	}
+//	print_COMEX_all_Freelist();
+//	print_COMEX_Freelist(RemoteID);
+}
+EXPORT_SYMBOL(COMEX_recv_fill);
+
+void COMEX_recv_asked(int order){
+	unsigned long availAddress = 0;
+	
+	if(COMEX_Ready == 1){
+		while(availAddress == 0 && order > 5){
+			availAddress = COMEX_get_from_Buddy(order);
+			order--;
+		}
+		printk(KERN_INFO "%s: Address %lu Order %d", __FUNCTION__, availAddress, order);
+	}
+}
+EXPORT_SYMBOL(COMEX_recv_asked);
+
+//////////////////// COMEX ////////////////////
+
+unsigned int totalLookUPEntry = 0;
+unsigned long COMEX_start_addr;
+unsigned long *comexLookUP;
 
 static spinlock_t COMEX_Buddy_lock; 
 
@@ -719,7 +912,6 @@ struct COMEX_free_area {
 typedef struct Dummy_zone {
 	struct COMEX_free_area free_area[COMEX_MAX_ORDER];
 } COMEX_Zone;
-
 COMEX_Zone *COMEX_Buddy_Zone;
 
 typedef struct Dummy_page {
@@ -733,7 +925,6 @@ typedef struct Dummy_page {
 	struct page *pageDesc;
 	
 } COMEX_page;
-
 COMEX_page *COMEX_Buddy_page;
 
 void COMEX_signal(int sigN){
@@ -762,27 +953,6 @@ void COMEX_signal(int sigN){
 	}
 }
 
-/*
- * At what user virtual address is page expected in @vma?
- * Returns virtual address or -EFAULT if page's index/offset is not
- * within the range mapped the @vma.
- */
-static inline unsigned long
-vma_address(struct page *page, struct vm_area_struct *vma)
-{
-	pgoff_t pgoff = page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
-	unsigned long address;
-
-	if (unlikely(is_vm_hugetlb_page(vma)))
-		pgoff = page->index << huge_page_order(page_hstate(page));
-	address = vma->vm_start + ((pgoff - vma->vm_pgoff) << PAGE_SHIFT);
-	if (unlikely(address < vma->vm_start || address >= vma->vm_end)) {
-		/* page should be within @vma mapping range */
-		return -EFAULT;
-	}
-	return address;
-}
-
 int powOrder(int Order){
 	int result = 1;
 	
@@ -803,15 +973,15 @@ pte_t pageWalk_getPTE(unsigned long Addr){
 	
 	pgd = pgd_offset(COMEX_mm, Addr);
 	if (pgd_none(*pgd) || pgd_bad(*pgd)){
-		printk(KERN_INFO "PGD bug\n");
+		printk(KERN_INFO "%s: PGD bug\n", __FUNCTION__);
 	}	
 	pud = pud_offset(pgd, Addr);
 	if (pud_none(*pud) || pud_bad(*pud)){
-		printk(KERN_INFO "PUD bug\n");
+		printk(KERN_INFO "%s: PUD bug\n", __FUNCTION__);
 	}
 	pmd = pmd_offset(pud, Addr);
 	if (pmd_none(*pmd) || pmd_bad(*pmd)){
-		printk(KERN_INFO "PMD bug\n");
+		printk(KERN_INFO "%s: PMD bug\n", __FUNCTION__);
 	}	
 	
 	ptep = pte_offset_map_lock(COMEX_mm, pmd, Addr, &ptl);
@@ -884,7 +1054,6 @@ int binSearchCOMEXLookUP(unsigned long value){
 	return -1;
 }
 
-
 static inline void COMEX_ClearPageBuddy(COMEX_page *page){
 //	VM_BUG_ON(!PageBuddy(page));
 	atomic_set(&page->_mapcount, -1);
@@ -894,22 +1063,19 @@ static inline void COMEX_rmv_page_order(COMEX_page *page){
 	set_page_private(page, 0);
 }
 
-static inline void COMEX_SetPageBuddy(COMEX_page *page)
-{
+static inline void COMEX_SetPageBuddy(COMEX_page *page){
 //	VM_BUG_ON(atomic_read(&page->_mapcount) != -1);
 	atomic_set(&page->_mapcount, (-128));
 }
-static inline void COMEX_set_page_order(COMEX_page *page, int order)
-{
+static inline void COMEX_set_page_order(COMEX_page *page, int order){
 	set_page_private(page, order);
 	COMEX_SetPageBuddy(page);
 }
 
 static inline void COMEX_expand(COMEX_Zone *zone, COMEX_page *page,	
-	int low, int high, struct COMEX_free_area *area,int migratetype)
-{
+	int low, int high, struct COMEX_free_area *area,int migratetype){
+	
 	unsigned long size = 1 << high;
-
 	while (high > low) {
 		area--;
 		high--;
@@ -925,40 +1091,34 @@ unsigned long COMEX_page_to_pfn(COMEX_page *page){
 	return page->pageNO;
 }
 
-static inline int COMEX_PageBuddy(COMEX_page *page)
-{
+static inline int COMEX_PageBuddy(COMEX_page *page){
 	return atomic_read(&page->_mapcount) == (-128);
 }
 
-static inline unsigned long COMEX_page_order(COMEX_page *page)
-{
+static inline unsigned long COMEX_page_order(COMEX_page *page){
 	return page->private;
 }
 
-static inline int COMEX_page_is_buddy(COMEX_page *page, COMEX_page *buddy, int order)
-{
-	if (COMEX_PageBuddy(buddy) && COMEX_page_order(buddy) == order) {
+static inline int COMEX_page_is_buddy(COMEX_page *page, COMEX_page *buddy, int order){
+	if (COMEX_PageBuddy(buddy) && COMEX_page_order(buddy) == order){
 		return 1;
 	}
 	return 0;
 }
 
 static inline COMEX_page *
-COMEX_page_find_buddy(COMEX_page *page, unsigned long page_idx, unsigned int order)
-{
+COMEX_page_find_buddy(COMEX_page *page, unsigned long page_idx, unsigned int order){
 	unsigned long buddy_idx = page_idx ^ (1 << order);
 
 	return page + (buddy_idx - page_idx);
 }
 
 static inline unsigned long
-COMEX_find_combined_index(unsigned long page_idx, unsigned int order)
-{
+COMEX_find_combined_index(unsigned long page_idx, unsigned int order){
 	return (page_idx & ~(1 << order));
 }
 
-static inline void COMEX_free_one_page(unsigned long inPageNO, unsigned int order)
-{
+static inline void COMEX_free_one_page(unsigned long inPageNO, unsigned int order){
 	unsigned long page_idx;
 	unsigned long combined_idx;
 	int migratetype = 0;
@@ -966,7 +1126,7 @@ static inline void COMEX_free_one_page(unsigned long inPageNO, unsigned int orde
 	COMEX_page *page = &COMEX_Buddy_page[inPageNO];
 	COMEX_Zone *zone = COMEX_Buddy_Zone;
 
-	printk(KERN_INFO "%s: PageNO %lu\n", __FUNCTION__, page->pageNO);
+//	printk(KERN_INFO "%s: PageNO %lu\n", __FUNCTION__, page->pageNO);
 	page_idx = COMEX_page_to_pfn(page) & ((1 << COMEX_MAX_ORDER) - 1);
 
 	while (order < COMEX_MAX_ORDER-1) {
@@ -1016,8 +1176,7 @@ out:
  * the smallest available page from the freelists
  */
 static inline
-unsigned long COMEX_rmqueue_smallest(unsigned int order)
-{
+unsigned long COMEX_rmqueue_smallest(unsigned int order){
 	COMEX_Zone *zone = COMEX_Buddy_Zone;
 	int migratetype = 0;
 	
@@ -1042,7 +1201,32 @@ unsigned long COMEX_rmqueue_smallest(unsigned int order)
 	return 0;
 }
 
-void print_free_blocks(){
+unsigned long COMEX_get_from_Buddy(int order){
+	unsigned long pageNO = 0;
+	
+	spin_unlock_wait(&COMEX_Buddy_lock);
+	spin_lock(&COMEX_Buddy_lock);
+	pageNO = COMEX_rmqueue_smallest(order);
+	spin_unlock(&COMEX_Buddy_lock);
+	
+//	printk(KERN_INFO "%s: Allocate %lu\n", __FUNCTION__, pageNO);	
+	if(pageNO > 0)
+		return COMEX_start_addr + (pageNO-1)*X86PageSize;
+	
+	return 0;
+}
+
+void COMEX_free_to_Buddy(unsigned long pageNO, unsigned int order){
+
+	spin_unlock_wait(&COMEX_Buddy_lock);
+	spin_lock(&COMEX_Buddy_lock);
+	COMEX_free_one_page(pageNO, order);
+	spin_unlock(&COMEX_Buddy_lock);
+	
+//	printk(KERN_INFO "%s: Free %lu\n", __FUNCTION__, pageNO);	
+}
+
+void print_free_blocks(void){
 	int i;
 	
 	for(i=0; i<COMEX_MAX_ORDER; i++){
@@ -1051,9 +1235,115 @@ void print_free_blocks(){
 	printk(KERN_INFO "%s: \n", __FUNCTION__);
 }
 
-void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long endAddr){
+void init_Remote(void){
+	
+	int i;
+	unsigned long tmpStartAddr;
+	pgd_t *COMEX_pgd;
+	pud_t *COMEX_pud;
+	pmd_t *COMEX_pmd;
+	pte_t *COMEX_ptep, COMEX_pte;
+	spinlock_t *COMEX_ptl;
+	
+	struct page *COMEXpageDesc;	
+	
+	bufferDesc = (COMEXbuffer *)vmalloc(sizeof(COMEXbuffer)*COMEX_MAX_Buffer);
+	tmpStartAddr = COMEX_buffer_addr;
+	for(i=0; i<COMEX_MAX_Buffer; i++){
+	
+		bufferDesc[i].isFree = 0;
+		
+		COMEX_pgd = pgd_offset(COMEX_mm, tmpStartAddr);
+		if (pgd_none(*COMEX_pgd) || pgd_bad(*COMEX_pgd)){
+			printk(KERN_INFO "%s: PGD bug\n", __FUNCTION__);
+		}
+		COMEX_pud = pud_offset(COMEX_pgd, tmpStartAddr);
+		if (pud_none(*COMEX_pud) || pud_bad(*COMEX_pud)){
+			printk(KERN_INFO "%s: PUD bug\n", __FUNCTION__);
+		}
+		COMEX_pmd = pmd_offset(COMEX_pud, tmpStartAddr);
+		if (pmd_none(*COMEX_pmd) || pmd_bad(*COMEX_pmd)){
+			printk(KERN_INFO "%s: PMD bug\n", __FUNCTION__);
+		}
+		COMEX_ptep = pte_offset_map_lock(COMEX_mm, COMEX_pmd, tmpStartAddr, &COMEX_ptl);
+		COMEX_pte = *COMEX_ptep;
+		COMEXpageDesc = pte_page(COMEX_pte);
+		bufferDesc[i].pageDesc = COMEXpageDesc;
+		pte_unmap_unlock(COMEX_ptep, COMEX_ptl);
+		
+//		printk(KERN_INFO "%s: bufferDesc->pageDesc %lu\n",__FUNCTION__, bufferDesc[i].pageDesc);
+		tmpStartAddr = tmpStartAddr + X86PageSize;
+	}
+	
+	for(i=0; i<COMEX_Total_Nodes; i++){
+		INIT_LIST_HEAD(&COMEX_Freelist[i].listHeader);
+		INIT_LIST_HEAD(&COMEX_Usedlist[i].listHeader);
+		
+		COMEX_Freelist[i].PageCounter = 0;
+		COMEX_Usedlist[i].PageCounter = 0;
+		
+		COMEX_Freelist[i].requestLock = 0;
+		COMEX_Usedlist[i].requestLock = 0;
+	}
+}
 
-	unsigned long *allPhyAddr, testPage[10], tmpStartAddr;
+struct sock *nl_sk = NULL;
+struct nlmsghdr *nlh;
+char NetlinkMSG[200];
+
+void NL_send_message(void){
+
+	struct sk_buff *skb_out;
+    int msg_size, res;
+	
+    msg_size = strlen(NetlinkMSG);
+    skb_out = nlmsg_new(msg_size, 0);
+    if(!skb_out){
+        printk(KERN_ERR "Failed to allocate new skb\n");
+        return;
+    } 
+    nlh=nlmsg_put(skb_out, 0, 0, NLMSG_DONE, msg_size, 0);
+
+    NETLINK_CB(skb_out).dst_group = 0; /* not in mcast group */
+    strncpy(nlmsg_data(nlh), NetlinkMSG, msg_size);
+    
+    res=nlmsg_unicast(nl_sk, skb_out, Listener_PID);    
+    if(res < 0)
+        printk(KERN_INFO "Error while sending bak to user\n");
+}
+
+static void Kernel_nl_recv_msg(struct sk_buff *skb){
+
+    nlh = (struct nlmsghdr*)skb->data;
+    Listener_PID = nlh->nlmsg_pid; /*pid of sending process */
+    printk(KERN_INFO "COMEX %d Listener %d Netlink received msg: %s\n", COMEX_PID, Listener_PID, (char*)nlmsg_data(nlh));
+    
+    if(Daemon_Ready == 1){
+    	COMEX_Ready = 1;
+    }
+    
+    sprintf(NetlinkMSG, "Test <3 Message from Kernel !");
+    NL_send_message();
+    sprintf(NetlinkMSG, "Test <3 Test <3 Message from Kernel !");
+    NL_send_message();
+    sprintf(NetlinkMSG, "Test <3 Test <3 Test <3 Message from Kernel !");
+    NL_send_message();
+}
+
+int init_NetLink(void){
+	
+    nl_sk = netlink_kernel_create(&init_net, NETLINK_COMEX_KERNEL, 0, Kernel_nl_recv_msg, NULL, THIS_MODULE);
+    if(!nl_sk){
+        printk(KERN_INFO "%s: Error creating socket...\n",__FUNCTION__);
+        return 0;
+    }
+    printk(KERN_INFO "%s: Successful creating socket...\n",__FUNCTION__);    
+    return 1;
+}
+
+void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, unsigned long endAddr, unsigned long Buffer_Addr, int MaxBuffer){
+
+	unsigned long *allPhyAddr, tmpStartAddr;
 	unsigned int *allPageNO;
 	unsigned int pageNO, nPages, i, j;	
 	unsigned int n_conPages, currentOrder, availPages, entry;
@@ -1071,21 +1361,24 @@ void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long end
 	COMEX_task_struct = pid_task(find_vpid(COMEX_PID), PIDTYPE_PID);
 	COMEX_mm = COMEX_task_struct->mm;
 	COMEX_vma = COMEX_mm->mmap;	
-	COMEX_start_addr = startAddr;
-	tmpStartAddr = startAddr;
 	
+	COMEX_Node_ID = NodeID;
+	COMEX_Total_Nodes = N_Nodes;
+	COMEX_start_addr = startAddr;
+	COMEX_buffer_addr = Buffer_Addr;
+	COMEX_MAX_Buffer = MaxBuffer;
+	
+	printk(KERN_INFO "%s: COMEX_Ready %d COMEX_PID %d", __FUNCTION__, COMEX_Ready, COMEX_PID);	
+	printk(KERN_INFO "%s: NodeID %d N_Nodes %d", __FUNCTION__, COMEX_Node_ID, COMEX_Total_Nodes);
+	printk(KERN_INFO "%s: Start address %lu End Address %lu", __FUNCTION__, COMEX_start_addr, endAddr);
+	printk(KERN_INFO "%s: Buffer address %lu Total Buffer %d", __FUNCTION__, COMEX_buffer_addr, MaxBuffer);
+	
+	tmpStartAddr = startAddr;
 	nPages = ((endAddr-startAddr) / X86PageSize) +1;
-	printk(KERN_INFO "%s: COMEX_Ready %d COMEX_PID %d\n", __FUNCTION__, COMEX_Ready, COMEX_PID);
-	printk(KERN_INFO "%s: startAddr %lu endAddr %lu\n", __FUNCTION__, startAddr, endAddr);	
-	printk(KERN_INFO "%s: nPages %d\n", __FUNCTION__, nPages);
 	
 	////////////////////	Init COMEX Buddy System	//////////////////// 
 	
-	COMEX_Buddy_lock = SPIN_LOCK_UNLOCKED;
-	
-	//COMEX_Zone *COMEX_Buddy_Zone; COMEX_MAX_ORDER
-	//COMEX_page *COMEX_Buddy_page;
-	
+	spin_lock_init(&COMEX_Buddy_lock);
 	COMEX_Buddy_Zone = (COMEX_Zone *)vmalloc(sizeof(COMEX_Zone));
 	COMEX_Buddy_page = (COMEX_page *)vmalloc(sizeof(COMEX_page)*nPages);
 	
@@ -1101,21 +1394,20 @@ void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long end
 		
 		COMEX_pgd = pgd_offset(COMEX_mm, tmpStartAddr);
 		if (pgd_none(*COMEX_pgd) || pgd_bad(*COMEX_pgd)){
-			printk(KERN_INFO "PGD bug\n");
-		}	
+			printk(KERN_INFO "%s: PGD bug\n", __FUNCTION__);
+		}
 		COMEX_pud = pud_offset(COMEX_pgd, tmpStartAddr);
 		if (pud_none(*COMEX_pud) || pud_bad(*COMEX_pud)){
-			printk(KERN_INFO "PUD bug\n");
+			printk(KERN_INFO "%s: PUD bug\n", __FUNCTION__);
 		}
 		COMEX_pmd = pmd_offset(COMEX_pud, tmpStartAddr);
 		if (pmd_none(*COMEX_pmd) || pmd_bad(*COMEX_pmd)){
-			printk(KERN_INFO "PMD bug\n");
+			printk(KERN_INFO "%s: PMD bug\n", __FUNCTION__);
 		}
 		COMEX_ptep = pte_offset_map_lock(COMEX_mm, COMEX_pmd, tmpStartAddr, &COMEX_ptl);
 		COMEX_pte = *COMEX_ptep;
 		COMEXpageDesc = pte_page(COMEX_pte);
 		COMEX_Buddy_page[i].pageDesc = COMEXpageDesc;
-//		printk(KERN_INFO " %s - count %d mapCount %d\n",  __FUNCTION__, atomic_read(&COMEXpageDesc->_count), page_mapcount(COMEXpageDesc));
 		pte_unmap_unlock(COMEX_ptep, COMEX_ptl);
 		
 		if(i%Biggest_Group == 0){
@@ -1200,9 +1492,10 @@ void COMEX_init_ENV(unsigned int PID, unsigned long startAddr, unsigned long end
 	vfree(allPhyAddr);
 	vfree(allPageNO);
 	
-	////////////////////	COMEX Look UP	//////////////////// End
+	init_Remote();
+	init_NetLink();
 	
-	COMEX_Ready = 1;
+	Daemon_Ready = 1;
 	COMEX_signal(-1);	// Finish Init signal
 }
 EXPORT_SYMBOL(COMEX_init_ENV);
@@ -1215,36 +1508,6 @@ void COMEX_Terminate(){
 }
 EXPORT_SYMBOL(COMEX_Terminate);
 
-unsigned long COMEX_get_from_Buddy(unsigned int order){
-	unsigned long pageNO = 0;
-	
-	spin_lock(&COMEX_Buddy_lock);
-	pageNO = COMEX_rmqueue_smallest(order);
-	spin_unlock(&COMEX_Buddy_lock);
-	
-	printk(KERN_INFO "%s: Allocate %lu\n", __FUNCTION__, pageNO);
-	
-	if(pageNO > 0)
-		return COMEX_start_addr + (pageNO-1)*X86PageSize;
-	
-	return 0;
-}
-
-unsigned long COMEX_get_from_Remote(unsigned int order){
-	unsigned long pageNO = 0;
-	
-	return 0;
-} 
-
-void COMEX_free_to_Buddy(unsigned long pageNO, unsigned int order){
-
-	spin_lock(&COMEX_Buddy_lock);
-	COMEX_free_one_page(pageNO, order);
-	spin_unlock(&COMEX_Buddy_lock);
-	
-	printk(KERN_INFO "%s: Free %lu\n", __FUNCTION__, pageNO);	
-}
-
 int COMEX_move_to_COMEX(struct page *old_page){
 	
 	unsigned long COMEX_address;
@@ -1255,28 +1518,29 @@ int COMEX_move_to_COMEX(struct page *old_page){
 	pgd_t *COMEX_pgd;
 	pud_t *COMEX_pud;
 	pmd_t *COMEX_pmd;
-	pte_t *COMEX_ptep, COMEX_pte, *old_ptePointer, old_pte;
-	spinlock_t *COMEX_ptl, *old_ptl;
+	pte_t *COMEX_ptep, COMEX_pte;
+	pte_t *old_ptePointer, old_pte;
+	spinlock_t *COMEX_ptl;
+	spinlock_t *old_ptl;
 	
 	COMEX_address = COMEX_get_from_Buddy(0);
 	if(COMEX_address == 0){
-		COMEX_address = COMEX_get_from_Remote(0);
+		return 0;
 	}
-//	printk(KERN_INFO "%s: Debug Message %lu\n", __FUNCTION__, COMEX_address);
 	
 	COMEX_pgd = pgd_offset(COMEX_mm, COMEX_address);
 	if (pgd_none(*COMEX_pgd) || pgd_bad(*COMEX_pgd)){
-//		printk(KERN_INFO "PGD bug\n");
+		printk(KERN_INFO "%s: PGD bug\n", __FUNCTION__);
 		return 0;
-	}	
+	}
 	COMEX_pud = pud_offset(COMEX_pgd, COMEX_address);
 	if (pud_none(*COMEX_pud) || pud_bad(*COMEX_pud)){
-//		printk(KERN_INFO "PUD bug\n");
+		printk(KERN_INFO "%s: PUD bug\n", __FUNCTION__);
 		return 0;
 	}
 	COMEX_pmd = pmd_offset(COMEX_pud, COMEX_address);
 	if (pmd_none(*COMEX_pmd) || pmd_bad(*COMEX_pmd)){
-//		printk(KERN_INFO "PMD bug\n");
+		printk(KERN_INFO "%s: PMD bug\n", __FUNCTION__);
 		return 0;
 	}
 	COMEX_ptep = pte_offset_map_lock(COMEX_mm, COMEX_pmd, COMEX_address, &COMEX_ptl);
@@ -1330,10 +1594,36 @@ int COMEX_move_to_COMEX(struct page *old_page){
 	}
 	page_unlock_anon_vma(anon_vma);
 	
+//	printk(KERN_INFO "%s: OK...\n", __FUNCTION__);
 	pte_unmap_unlock(COMEX_ptep, COMEX_ptl);
 	unlock_page(new_page);	
 	unlock_page(old_page);
 	return 1;
+}
+
+int get_Frist_PID(struct page *page){
+
+	struct vm_area_struct *vma;
+	struct mm_struct *mm;
+	struct task_struct *myTask;
+	struct anon_vma *anon_vma;
+	struct anon_vma_chain *avc;
+	int ret = -1;
+	
+	anon_vma = page_lock_anon_vma(page);
+	if (!anon_vma){
+		return ret;
+	}	
+	list_for_each_entry(avc, &anon_vma->head, same_anon_vma) {			
+		vma = avc->vma;
+		mm = vma->vm_mm;
+		myTask = mm->owner;		
+		ret = myTask->pid;
+		break;
+	}	
+	page_unlock_anon_vma(anon_vma);
+	
+	return ret;
 }
 
 /*
@@ -1344,12 +1634,42 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				      struct scan_control *sc)
 {
 	LIST_HEAD(ret_pages);
+
 	LIST_HEAD(free_pages);
+	LIST_HEAD(sorted_list);	
 	int pgactivate = 0;
 	unsigned long nr_dirty = 0;
 	unsigned long nr_congested = 0;
 	unsigned long nr_reclaimed = 0;
-
+	
+	struct page *target_page, *temp;
+	int target_PID, Min_PID;
+	
+	if(COMEX_Ready == 1){	
+		while (!list_empty(page_list)) {	
+			Min_PID = INT_MAX;
+			
+			list_for_each_entry(target_page, page_list, lru) {
+				target_PID = get_Frist_PID(target_page);	
+						
+				if(target_PID < Min_PID)
+					Min_PID = target_PID;
+			}
+			
+			list_for_each_entry_safe(target_page, temp,page_list, lru) {
+				target_PID = get_Frist_PID(target_page);
+				
+				if(target_PID == Min_PID){
+					list_move(&target_page->lru, &sorted_list);
+				}
+			}
+		}
+		list_for_each_entry_safe(target_page, temp, &sorted_list, lru) {
+			target_PID = get_Frist_PID(target_page);
+			
+			list_move(&target_page->lru, page_list);
+		}
+	}
 	cond_resched();
 
 	while (!list_empty(page_list)) {
@@ -1393,7 +1713,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			 * for any page for which writeback has already
 			 * started.
 			 */
-			if (sc->lumpy_reclaim_mode == LUMPY_MODE_SYNC &&
+			if ((sc->reclaim_mode & RECLAIM_MODE_SYNC) &&
 			    may_enter_fs)
 				wait_on_page_writeback(page);
 			else {
@@ -1420,17 +1740,21 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		if (PageAnon(page) && !PageSwapCache(page)) {
 			if (!(sc->gfp_mask & __GFP_IO))
 				goto keep_locked;
-				
+
 			if(COMEX_Ready == 1){
-				if(COMEX_move_to_COMEX(page))
+				if(COMEX_move_to_COMEX(page) == 1){
 					goto COMEX_Out;
+				}
+//				if(COMEX_move_to_Remote(page) != -1){
+//					goto COMEX_Out;
+//				}
 			}
 			
 			if (!add_to_swap(page))
 				goto activate_locked;
 			may_enter_fs = 1;
 		}
-		
+
 COMEX_Out:
 
 		mapping = page_mapping(page);
@@ -1557,7 +1881,7 @@ cull_mlocked:
 			try_to_free_swap(page);
 		unlock_page(page);
 		putback_lru_page(page);
-		disable_lumpy_reclaim_mode(sc);
+		reset_reclaim_mode(sc);
 		continue;
 
 activate_locked:
@@ -1570,14 +1894,11 @@ activate_locked:
 keep_locked:
 		unlock_page(page);
 keep:
-		disable_lumpy_reclaim_mode(sc);
+		reset_reclaim_mode(sc);
 keep_lumpy:
 		list_add(&page->lru, &ret_pages);
 		VM_BUG_ON(PageLRU(page) || PageUnevictable(page));
 	}
-	
-	if(COMEX_Ready == 1)
-		print_free_blocks();
 
 	/*
 	 * Tag a zone as congested if all the dirty pages encountered were
@@ -1585,7 +1906,7 @@ keep_lumpy:
 	 * back off and wait for congestion to clear because further reclaim
 	 * will encounter the same problem
 	 */
-	if (nr_dirty == nr_congested && nr_dirty != 0)
+	if (nr_dirty && nr_dirty == nr_congested && scanning_global_lru(sc))
 		zone_set_flag(zone, ZONE_CONGESTED);
 
 	free_page_list(&free_pages);
@@ -1595,7 +1916,6 @@ keep_lumpy:
 	return nr_reclaimed;
 }
 //////////////////// COMEX ////////////////////
-
 /*
  * Attempt to remove the specified page from its LRU.  Only take this page
  * if it is of the appropriate PageActive status.  Pages which are being
@@ -1694,7 +2014,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		case 0:
 			list_move(&page->lru, dst);
 			mem_cgroup_del_lru(page);
-			nr_taken++;
+			nr_taken += hpage_nr_pages(page);
 			break;
 
 		case -EBUSY:
@@ -1715,7 +2035,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		 * surrounding the tag page.  Only take those pages of
 		 * the same active state as that tag page.  We may safely
 		 * round the target page pfn down to the requested order
-		 * as the mem_map is guarenteed valid out to MAX_ORDER,
+		 * as the mem_map is guaranteed valid out to MAX_ORDER,
 		 * where that page is in a different zone we will detect
 		 * it from its zone id and abort this block scan.
 		 */
@@ -1752,14 +2072,26 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 			if (__isolate_lru_page(cursor_page, mode, file) == 0) {
 				list_move(&cursor_page->lru, dst);
 				mem_cgroup_del_lru(cursor_page);
-				nr_taken++;
+				nr_taken += hpage_nr_pages(page);
 				nr_lumpy_taken++;
 				if (PageDirty(cursor_page))
 					nr_lumpy_dirty++;
 				scan++;
 			} else {
-				/* the page is freed already. */
-				if (!page_count(cursor_page))
+				/*
+				 * Check if the page is freed already.
+				 *
+				 * We can't use page_count() as that
+				 * requires compound_head and we don't
+				 * have a pin on the page here. If a
+				 * page is tail, we may or may not
+				 * have isolated the head, so assume
+				 * it's not free, it'd be tricky to
+				 * track the head status without a
+				 * page pin.
+				 */
+				if (!PageTail(cursor_page) &&
+				    !atomic_read(&cursor_page->_count))
 					continue;
 				break;
 			}
@@ -1807,14 +2139,15 @@ static unsigned long clear_active_flags(struct list_head *page_list,
 	struct page *page;
 
 	list_for_each_entry(page, page_list, lru) {
+		int numpages = hpage_nr_pages(page);
 		lru = page_lru_base_type(page);
 		if (PageActive(page)) {
 			lru += LRU_ACTIVE;
 			ClearPageActive(page);
-			nr_active++;
+			nr_active += numpages;
 		}
 		if (count)
-			count[lru]++;
+			count[lru] += numpages;
 	}
 
 	return nr_active;
@@ -1924,7 +2257,8 @@ putback_lru_pages(struct zone *zone, struct scan_control *sc,
 		add_page_to_lru_list(zone, page, lru);
 		if (is_active_lru(lru)) {
 			int file = is_file_lru(lru);
-			reclaim_stat->recent_rotated[file]++;
+			int numpages = hpage_nr_pages(page);
+			reclaim_stat->recent_rotated[file] += numpages;
 		}
 		if (!pagevec_add(&pvec, page)) {
 			spin_unlock_irq(&zone->lru_lock);
@@ -1990,7 +2324,7 @@ static inline bool should_reclaim_stall(unsigned long nr_taken,
 		return false;
 
 	/* Only stall on lumpy reclaim */
-	if (sc->lumpy_reclaim_mode == LUMPY_MODE_NONE)
+	if (sc->reclaim_mode & RECLAIM_MODE_SINGLE)
 		return false;
 
 	/* If we have relaimed everything on the isolated list, no stall */
@@ -2034,15 +2368,15 @@ shrink_inactive_list(unsigned long nr_to_scan, struct zone *zone,
 			return SWAP_CLUSTER_MAX;
 	}
 
-	set_lumpy_reclaim_mode(priority, sc, false);
+	set_reclaim_mode(priority, sc, false);
 	lru_add_drain();
 	spin_lock_irq(&zone->lru_lock);
 
 	if (scanning_global_lru(sc)) {
 		nr_taken = isolate_pages_global(nr_to_scan,
 			&page_list, &nr_scanned, sc->order,
-			sc->lumpy_reclaim_mode == LUMPY_MODE_NONE ?
-					ISOLATE_INACTIVE : ISOLATE_BOTH,
+			sc->reclaim_mode & RECLAIM_MODE_LUMPYRECLAIM ?
+					ISOLATE_BOTH : ISOLATE_INACTIVE,
 			zone, 0, file);
 		zone->pages_scanned += nr_scanned;
 		if (current_is_kswapd())
@@ -2054,8 +2388,8 @@ shrink_inactive_list(unsigned long nr_to_scan, struct zone *zone,
 	} else {
 		nr_taken = mem_cgroup_isolate_pages(nr_to_scan,
 			&page_list, &nr_scanned, sc->order,
-			sc->lumpy_reclaim_mode == LUMPY_MODE_NONE ?
-					ISOLATE_INACTIVE : ISOLATE_BOTH,
+			sc->reclaim_mode & RECLAIM_MODE_LUMPYRECLAIM ?
+					ISOLATE_BOTH : ISOLATE_INACTIVE,
 			zone, sc->mem_cgroup,
 			0, file);
 		/*
@@ -2077,7 +2411,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct zone *zone,
 
 	/* Check if we should syncronously wait for writeback */
 	if (should_reclaim_stall(nr_taken, nr_reclaimed, priority, sc)) {
-		set_lumpy_reclaim_mode(priority, sc, true);
+		set_reclaim_mode(priority, sc, true);
 		nr_reclaimed += shrink_page_list(&page_list, zone, sc);
 	}
 
@@ -2092,7 +2426,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct zone *zone,
 		zone_idx(zone),
 		nr_scanned, nr_reclaimed,
 		priority,
-		trace_shrink_flags(file, sc->lumpy_reclaim_mode));
+		trace_shrink_flags(file, sc->reclaim_mode));
 	return nr_reclaimed;
 }
 
@@ -2132,7 +2466,7 @@ static void move_active_pages_to_lru(struct zone *zone,
 
 		list_move(&page->lru, &zone->lru[lru].list);
 		mem_cgroup_add_lru_list(page, lru);
-		pgmoved++;
+		pgmoved += hpage_nr_pages(page);
 
 		if (!pagevec_add(&pvec, page) || list_empty(list)) {
 			spin_unlock_irq(&zone->lru_lock);
@@ -2159,6 +2493,7 @@ static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
 	struct page *page;
 	struct zone_reclaim_stat *reclaim_stat = get_reclaim_stat(zone, sc);
 	unsigned long nr_rotated = 0;
+
 
 	lru_add_drain();
 	spin_lock_irq(&zone->lru_lock);
@@ -2200,7 +2535,7 @@ static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
 		}
 
 		if (page_referenced(page, 0, sc->mem_cgroup, &vm_flags)) {
-			nr_rotated++;
+			nr_rotated += hpage_nr_pages(page);
 			/*
 			 * Identify referenced, file-backed active pages and
 			 * give them one more trip around the active list. So
@@ -2471,6 +2806,69 @@ out:
 }
 
 /*
+ * Reclaim/compaction depends on a number of pages being freed. To avoid
+ * disruption to the system, a small number of order-0 pages continue to be
+ * rotated and reclaimed in the normal fashion. However, by the time we get
+ * back to the allocator and call try_to_compact_zone(), we ensure that
+ * there are enough free pages for it to be likely successful
+ */
+static inline bool should_continue_reclaim(struct zone *zone,
+					unsigned long nr_reclaimed,
+					unsigned long nr_scanned,
+					struct scan_control *sc)
+{
+	unsigned long pages_for_compaction;
+	unsigned long inactive_lru_pages;
+
+	/* If not in reclaim/compaction mode, stop */
+	if (!(sc->reclaim_mode & RECLAIM_MODE_COMPACTION))
+		return false;
+
+	/* Consider stopping depending on scan and reclaim activity */
+	if (sc->gfp_mask & __GFP_REPEAT) {
+		/*
+		 * For __GFP_REPEAT allocations, stop reclaiming if the
+		 * full LRU list has been scanned and we are still failing
+		 * to reclaim pages. This full LRU scan is potentially
+		 * expensive but a __GFP_REPEAT caller really wants to succeed
+		 */
+		if (!nr_reclaimed && !nr_scanned)
+			return false;
+	} else {
+		/*
+		 * For non-__GFP_REPEAT allocations which can presumably
+		 * fail without consequence, stop if we failed to reclaim
+		 * any pages from the last SWAP_CLUSTER_MAX number of
+		 * pages that were scanned. This will return to the
+		 * caller faster at the risk reclaim/compaction and
+		 * the resulting allocation attempt fails
+		 */
+		if (!nr_reclaimed)
+			return false;
+	}
+
+	/*
+	 * If we have not reclaimed enough pages for compaction and the
+	 * inactive lists are large enough, continue reclaiming
+	 */
+	pages_for_compaction = (2UL << sc->order);
+	inactive_lru_pages = zone_nr_lru_pages(zone, sc, LRU_INACTIVE_ANON) +
+				zone_nr_lru_pages(zone, sc, LRU_INACTIVE_FILE);
+	if (sc->nr_reclaimed < pages_for_compaction &&
+			inactive_lru_pages > pages_for_compaction)
+		return true;
+
+	/* If compaction would go ahead or the allocation would succeed, stop */
+	switch (compaction_suitable(zone, sc->order)) {
+	case COMPACT_PARTIAL:
+	case COMPACT_CONTINUE:
+		return false;
+	default:
+		return true;
+	}
+}
+
+/*
  * This is a basic per-zone page freer.  Used by both kswapd and direct reclaim.
  */
 static void shrink_zone(int priority, struct zone *zone,
@@ -2479,9 +2877,12 @@ static void shrink_zone(int priority, struct zone *zone,
 	unsigned long nr[NR_LRU_LISTS];
 	unsigned long nr_to_scan;
 	enum lru_list l;
-	unsigned long nr_reclaimed = sc->nr_reclaimed;
+	unsigned long nr_reclaimed, nr_scanned;
 	unsigned long nr_to_reclaim = sc->nr_to_reclaim;
 
+restart:
+	nr_reclaimed = 0;
+	nr_scanned = sc->nr_scanned;
 	get_scan_count(zone, sc, nr, priority);
 
 	while (nr[LRU_INACTIVE_ANON] || nr[LRU_ACTIVE_FILE] ||
@@ -2507,8 +2908,7 @@ static void shrink_zone(int priority, struct zone *zone,
 		if (nr_reclaimed >= nr_to_reclaim && priority < DEF_PRIORITY)
 			break;
 	}
-
-	sc->nr_reclaimed = nr_reclaimed;
+	sc->nr_reclaimed += nr_reclaimed;
 
 	/*
 	 * Even if we did not try to evict anon pages at all, we want to
@@ -2516,6 +2916,11 @@ static void shrink_zone(int priority, struct zone *zone,
 	 */
 	if (inactive_anon_is_low(zone, sc))
 		shrink_active_list(SWAP_CLUSTER_MAX, zone, sc, priority, 0);
+
+	/* reclaim/compaction might need reclaim to continue */
+	if (should_continue_reclaim(zone, nr_reclaimed,
+					sc->nr_scanned - nr_scanned, sc))
+		goto restart;
 
 	throttle_vm_writeout(sc->gfp_mask);
 }
@@ -2542,6 +2947,7 @@ static void shrink_zones(int priority, struct zonelist *zonelist,
 	struct zoneref *z;
 	struct zone *zone;
 
+
 	for_each_zone_zonelist_nodemask(zone, z, zonelist,
 					gfp_zone(sc->gfp_mask), sc->nodemask) {
 		if (!populated_zone(zone))
@@ -2566,17 +2972,12 @@ static bool zone_reclaimable(struct zone *zone)
 	return zone->pages_scanned < zone_reclaimable_pages(zone) * 6;
 }
 
-/*
- * As hibernation is going on, kswapd is freezed so that it can't mark
- * the zone into all_unreclaimable. It can't handle OOM during hibernation.
- * So let's check zone's unreclaimable in direct reclaim as well as kswapd.
- */
+/* All zones in zonelist are unreclaimable? */
 static bool all_unreclaimable(struct zonelist *zonelist,
 		struct scan_control *sc)
 {
 	struct zoneref *z;
 	struct zone *zone;
-	bool all_unreclaimable = true;
 
 	for_each_zone_zonelist_nodemask(zone, z, zonelist,
 			gfp_zone(sc->gfp_mask), sc->nodemask) {
@@ -2584,13 +2985,11 @@ static bool all_unreclaimable(struct zonelist *zonelist,
 			continue;
 		if (!cpuset_zone_allowed_hardwall(zone, GFP_KERNEL))
 			continue;
-		if (zone_reclaimable(zone)) {
-			all_unreclaimable = false;
-			break;
-		}
+		if (!zone->all_unreclaimable)
+			return false;
 	}
 
-	return all_unreclaimable;
+	return true;
 }
 
 /*
@@ -2624,6 +3023,7 @@ static unsigned long do_try_to_free_pages(struct zonelist *zonelist,
 
 	if (scanning_global_lru(sc))
 		count_vm_event(ALLOCSTALL);
+
 
 	for (priority = DEF_PRIORITY; priority >= 0; priority--) {
 		sc->nr_scanned = 0;
@@ -2673,10 +3073,12 @@ static unsigned long do_try_to_free_pages(struct zonelist *zonelist,
 			struct zone *preferred_zone;
 
 			first_zones_zonelist(zonelist, gfp_zone(sc->gfp_mask),
-							NULL, &preferred_zone);
+						&cpuset_current_mems_allowed,
+						&preferred_zone);
 			wait_iff_congested(preferred_zone, BLK_RW_ASYNC, HZ/10);
 		}
 	}
+
 
 out:
 	delayacct_freepages_end();
@@ -2684,6 +3086,14 @@ out:
 
 	if (sc->nr_reclaimed)
 		return sc->nr_reclaimed;
+
+	/*
+	 * As hibernation is going on, kswapd is freezed so that it can't mark
+	 * the zone into all_unreclaimable. Thus bypassing all_unreclaimable
+	 * check.
+	 */
+	if (oom_killer_disabled)
+		return 0;
 
 	/* top priority shrink_zones still had more to do? don't OOM, then */
 	if (scanning_global_lru(sc) && !all_unreclaimable(zonelist, sc))
@@ -2790,38 +3200,88 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *mem_cont,
 }
 #endif
 
+/*
+ * pgdat_balanced is used when checking if a node is balanced for high-order
+ * allocations. Only zones that meet watermarks and are in a zone allowed
+ * by the callers classzone_idx are added to balanced_pages. The total of
+ * balanced pages must be at least 25% of the zones allowed by classzone_idx
+ * for the node to be considered balanced. Forcing all zones to be balanced
+ * for high orders can cause excessive reclaim when there are imbalanced zones.
+ * The choice of 25% is due to
+ *   o a 16M DMA zone that is balanced will not balance a zone on any
+ *     reasonable sized machine
+ *   o On all other machines, the top zone must be at least a reasonable
+ *     percentage of the middle zones. For example, on 32-bit x86, highmem
+ *     would need to be at least 256M for it to be balance a whole node.
+ *     Similarly, on x86-64 the Normal zone would need to be at least 1G
+ *     to balance a node on its own. These seemed like reasonable ratios.
+ */
+static bool pgdat_balanced(pg_data_t *pgdat, unsigned long balanced_pages,
+						int classzone_idx)
+{
+	unsigned long present_pages = 0;
+	int i;
+
+	for (i = 0; i <= classzone_idx; i++)
+		present_pages += pgdat->node_zones[i].present_pages;
+
+	/* A special case here: if zone has no page, we think it's balanced */
+	return balanced_pages >= (present_pages >> 2);
+}
+
 /* is kswapd sleeping prematurely? */
-static int sleeping_prematurely(pg_data_t *pgdat, int order, long remaining)
+static bool sleeping_prematurely(pg_data_t *pgdat, int order, long remaining,
+					int classzone_idx)
 {
 	int i;
+	unsigned long balanced = 0;
+	bool all_zones_ok = true;
 
 	/* If a direct reclaimer woke kswapd within HZ/10, it's premature */
 	if (remaining)
-		return 1;
+		return true;
 
-	/* If after HZ/10, a zone is below the high mark, it's premature */
-	for (i = 0; i < pgdat->nr_zones; i++) {
+	/* Check the watermark levels */
+	for (i = 0; i <= classzone_idx; i++) {
 		struct zone *zone = pgdat->node_zones + i;
 
 		if (!populated_zone(zone))
 			continue;
 
-		if (zone->all_unreclaimable)
+		/*
+		 * balance_pgdat() skips over all_unreclaimable after
+		 * DEF_PRIORITY. Effectively, it considers them balanced so
+		 * they must be considered balanced here as well if kswapd
+		 * is to sleep
+		 */
+		if (zone->all_unreclaimable) {
+			balanced += zone->present_pages;
 			continue;
+		}
 
-		if (!zone_watermark_ok(zone, order, high_wmark_pages(zone),
-								0, 0))
-			return 1;
+		if (!zone_watermark_ok_safe(zone, order, high_wmark_pages(zone),
+							i, 0))
+			all_zones_ok = false;
+		else
+			balanced += zone->present_pages;
 	}
 
-	return 0;
+	/*
+	 * For high-order requests, the balanced zones must contain at least
+	 * 25% of the nodes pages for kswapd to sleep. For order-0, all zones
+	 * must be balanced
+	 */
+	if (order)
+		return !pgdat_balanced(pgdat, balanced, classzone_idx);
+	else
+		return !all_zones_ok;
 }
 
 /*
  * For kswapd, balance_pgdat() will work across all this node's zones until
  * they are all at high_wmark_pages(zone).
  *
- * Returns the number of pages which were actually freed.
+ * Returns the final order kswapd was reclaiming at
  *
  * There is special handling here for zones which are full of pinned pages.
  * This can happen if the pages are all mlocked, or if they are all used by
@@ -2838,11 +3298,14 @@ static int sleeping_prematurely(pg_data_t *pgdat, int order, long remaining)
  * interoperates with the page allocator fallback scheme to ensure that aging
  * of pages is balanced across the zones.
  */
-static unsigned long balance_pgdat(pg_data_t *pgdat, int order)
+static unsigned long balance_pgdat(pg_data_t *pgdat, int order,
+							int *classzone_idx)
 {
 	int all_zones_ok;
+	unsigned long balanced;
 	int priority;
 	int i;
+	int end_zone = 0;	/* Inclusive.  0 = ZONE_DMA */
 	unsigned long total_scanned;
 	struct reclaim_state *reclaim_state = current->reclaim_state;
 	struct scan_control sc = {
@@ -2865,7 +3328,6 @@ loop_again:
 	count_vm_event(PAGEOUTRUN);
 
 	for (priority = DEF_PRIORITY; priority >= 0; priority--) {
-		int end_zone = 0;	/* Inclusive.  0 = ZONE_DMA */
 		unsigned long lru_pages = 0;
 		int has_under_min_watermark_zone = 0;
 
@@ -2874,6 +3336,7 @@ loop_again:
 			disable_swap_token();
 
 		all_zones_ok = 1;
+		balanced = 0;
 
 		/*
 		 * Scan in the highmem->dma direction for the highest
@@ -2896,7 +3359,7 @@ loop_again:
 				shrink_active_list(SWAP_CLUSTER_MAX, zone,
 							&sc, priority, 0);
 
-			if (!zone_watermark_ok(zone, order,
+			if (!zone_watermark_ok_safe(zone, order,
 					high_wmark_pages(zone), 0, 0)) {
 				end_zone = i;
 				break;
@@ -2923,6 +3386,7 @@ loop_again:
 		for (i = 0; i <= end_zone; i++) {
 			struct zone *zone = pgdat->node_zones + i;
 			int nr_slab;
+			unsigned long balance_gap;
 
 			if (!populated_zone(zone))
 				continue;
@@ -2932,6 +3396,7 @@ loop_again:
 
 			sc.nr_scanned = 0;
 
+
 			/*
 			 * Call soft limit reclaim before calling shrink_zone.
 			 * For now we ignore the return value
@@ -2939,21 +3404,33 @@ loop_again:
 			mem_cgroup_soft_limit_reclaim(zone, order, sc.gfp_mask);
 
 			/*
-			 * We put equal pressure on every zone, unless one
-			 * zone has way too many pages free already.
+			 * We put equal pressure on every zone, unless
+			 * one zone has way too many pages free
+			 * already. The "too many pages" is defined
+			 * as the high wmark plus a "gap" where the
+			 * gap is either the low watermark or 1%
+			 * of the zone, whichever is smaller.
 			 */
-			if (!zone_watermark_ok(zone, order,
-					8*high_wmark_pages(zone), end_zone, 0))
+			balance_gap = min(low_wmark_pages(zone),
+				(zone->present_pages +
+					KSWAPD_ZONE_BALANCE_GAP_RATIO-1) /
+				KSWAPD_ZONE_BALANCE_GAP_RATIO);
+			if (!zone_watermark_ok_safe(zone, order,
+					high_wmark_pages(zone) + balance_gap,
+					end_zone, 0)) {
 				shrink_zone(priority, zone, &sc);
-			reclaim_state->reclaimed_slab = 0;
-			nr_slab = shrink_slab(sc.nr_scanned, GFP_KERNEL,
-						lru_pages);
-			sc.nr_reclaimed += reclaim_state->reclaimed_slab;
-			total_scanned += sc.nr_scanned;
-			if (zone->all_unreclaimable)
-				continue;
-			if (nr_slab == 0 && !zone_reclaimable(zone))
-				zone->all_unreclaimable = 1;
+
+
+				reclaim_state->reclaimed_slab = 0;
+				nr_slab = shrink_slab(sc.nr_scanned, GFP_KERNEL,
+							lru_pages);
+				sc.nr_reclaimed += reclaim_state->reclaimed_slab;
+				total_scanned += sc.nr_scanned;
+
+				if (nr_slab == 0 && !zone_reclaimable(zone))
+					zone->all_unreclaimable = 1;
+			}
+
 			/*
 			 * If we've done a decent amount of scanning and
 			 * the reclaim ratio is low, start doing writepage
@@ -2963,7 +3440,13 @@ loop_again:
 			    total_scanned > sc.nr_reclaimed + sc.nr_reclaimed / 2)
 				sc.may_writepage = 1;
 
-			if (!zone_watermark_ok(zone, order,
+			if (zone->all_unreclaimable) {
+				if (end_zone && end_zone == i)
+					end_zone--;
+				continue;
+			}
+
+			if (!zone_watermark_ok_safe(zone, order,
 					high_wmark_pages(zone), end_zone, 0)) {
 				all_zones_ok = 0;
 				/*
@@ -2971,7 +3454,7 @@ loop_again:
 				 * means that we have a GFP_ATOMIC allocation
 				 * failure risk. Hurry up!
 				 */
-				if (!zone_watermark_ok(zone, order,
+				if (!zone_watermark_ok_safe(zone, order,
 					    min_wmark_pages(zone), end_zone, 0))
 					has_under_min_watermark_zone = 1;
 			} else {
@@ -2983,10 +3466,12 @@ loop_again:
 				 * spectulatively avoid congestion waits
 				 */
 				zone_clear_flag(zone, ZONE_CONGESTED);
+				if (i <= *classzone_idx)
+					balanced += zone->present_pages;
 			}
 
 		}
-		if (all_zones_ok)
+		if (all_zones_ok || (order && pgdat_balanced(pgdat, balanced, *classzone_idx)))
 			break;		/* kswapd: all done */
 		/*
 		 * OK, kswapd is getting into trouble.  Take a nap, then take
@@ -3009,7 +3494,13 @@ loop_again:
 			break;
 	}
 out:
-	if (!all_zones_ok) {
+
+	/*
+	 * order-0: All zones must meet high watermark for a balanced node
+	 * high-order: Balanced zones must make up at least 25% of the node
+	 *             for the node to be balanced
+	 */
+	if (!(all_zones_ok || (order && pgdat_balanced(pgdat, balanced, *classzone_idx)))) {
 		cond_resched();
 
 		try_to_freeze();
@@ -3034,7 +3525,88 @@ out:
 		goto loop_again;
 	}
 
-	return sc.nr_reclaimed;
+	/*
+	 * If kswapd was reclaiming at a higher order, it has the option of
+	 * sleeping without all zones being balanced. Before it does, it must
+	 * ensure that the watermarks for order-0 on *all* zones are met and
+	 * that the congestion flags are cleared. The congestion flag must
+	 * be cleared as kswapd is the only mechanism that clears the flag
+	 * and it is potentially going to sleep here.
+	 */
+	if (order) {
+		for (i = 0; i <= end_zone; i++) {
+			struct zone *zone = pgdat->node_zones + i;
+
+			if (!populated_zone(zone))
+				continue;
+
+			if (zone->all_unreclaimable && priority != DEF_PRIORITY)
+				continue;
+
+			/* Confirm the zone is balanced for order-0 */
+			if (!zone_watermark_ok(zone, 0,
+					high_wmark_pages(zone), 0, 0)) {
+				order = sc.order = 0;
+				goto loop_again;
+			}
+
+			/* If balanced, clear the congested flag */
+			zone_clear_flag(zone, ZONE_CONGESTED);
+		}
+	}
+
+	/*
+	 * Return the order we were reclaiming at so sleeping_prematurely()
+	 * makes a decision on the order we were last reclaiming at. However,
+	 * if another caller entered the allocator slow path while kswapd
+	 * was awake, order will remain at the higher level
+	 */
+	*classzone_idx = end_zone;
+	return order;
+}
+
+static void kswapd_try_to_sleep(pg_data_t *pgdat, int order, int classzone_idx)
+{
+	long remaining = 0;
+	DEFINE_WAIT(wait);
+
+	if (freezing(current) || kthread_should_stop())
+		return;
+
+	prepare_to_wait(&pgdat->kswapd_wait, &wait, TASK_INTERRUPTIBLE);
+
+	/* Try to sleep for a short interval */
+	if (!sleeping_prematurely(pgdat, order, remaining, classzone_idx)) {
+		remaining = schedule_timeout(HZ/10);
+		finish_wait(&pgdat->kswapd_wait, &wait);
+		prepare_to_wait(&pgdat->kswapd_wait, &wait, TASK_INTERRUPTIBLE);
+	}
+
+	/*
+	 * After a short sleep, check if it was a premature sleep. If not, then
+	 * go fully to sleep until explicitly woken up.
+	 */
+	if (!sleeping_prematurely(pgdat, order, remaining, classzone_idx)) {
+		trace_mm_vmscan_kswapd_sleep(pgdat->node_id);
+
+		/*
+		 * vmstat counters are not perfectly accurate and the estimated
+		 * value for counters such as NR_FREE_PAGES can deviate from the
+		 * true value by nr_online_cpus * threshold. To avoid the zone
+		 * watermarks being breached while under pressure, we reduce the
+		 * per-cpu vmstat threshold while kswapd is awake and restore
+		 * them before going back to sleep.
+		 */
+		set_pgdat_percpu_threshold(pgdat, calculate_normal_threshold);
+		schedule();
+		set_pgdat_percpu_threshold(pgdat, calculate_pressure_threshold);
+	} else {
+		if (remaining)
+			count_vm_event(KSWAPD_LOW_WMARK_HIT_QUICKLY);
+		else
+			count_vm_event(KSWAPD_HIGH_WMARK_HIT_QUICKLY);
+	}
+	finish_wait(&pgdat->kswapd_wait, &wait);
 }
 
 /*
@@ -3052,10 +3624,11 @@ out:
  */
 static int kswapd(void *p)
 {
-	unsigned long order;
+	unsigned long order, new_order;
+	int classzone_idx, new_classzone_idx;
 	pg_data_t *pgdat = (pg_data_t*)p;
 	struct task_struct *tsk = current;
-	DEFINE_WAIT(wait);
+
 	struct reclaim_state reclaim_state = {
 		.reclaimed_slab = 0,
 	};
@@ -3082,50 +3655,37 @@ static int kswapd(void *p)
 	tsk->flags |= PF_MEMALLOC | PF_SWAPWRITE | PF_KSWAPD;
 	set_freezable();
 
-	order = 0;
+	order = new_order = 0;
+	classzone_idx = new_classzone_idx = pgdat->nr_zones - 1;
 	for ( ; ; ) {
-		unsigned long new_order;
 		int ret;
 
-		prepare_to_wait(&pgdat->kswapd_wait, &wait, TASK_INTERRUPTIBLE);
-		new_order = pgdat->kswapd_max_order;
-		pgdat->kswapd_max_order = 0;
-		if (order < new_order) {
+		/*
+		 * If the last balance_pgdat was unsuccessful it's unlikely a
+		 * new request of a similar or harder type will succeed soon
+		 * so consider going to sleep on the basis we reclaimed at
+		 */
+		if (classzone_idx >= new_classzone_idx && order == new_order) {
+			new_order = pgdat->kswapd_max_order;
+			new_classzone_idx = pgdat->classzone_idx;
+			pgdat->kswapd_max_order =  0;
+			pgdat->classzone_idx = pgdat->nr_zones - 1;
+		}
+
+		if (order < new_order || classzone_idx > new_classzone_idx) {
 			/*
 			 * Don't sleep if someone wants a larger 'order'
-			 * allocation
+			 * allocation or has tigher zone constraints
 			 */
 			order = new_order;
+			classzone_idx = new_classzone_idx;
 		} else {
-			if (!freezing(current) && !kthread_should_stop()) {
-				long remaining = 0;
-
-				/* Try to sleep for a short interval */
-				if (!sleeping_prematurely(pgdat, order, remaining)) {
-					remaining = schedule_timeout(HZ/10);
-					finish_wait(&pgdat->kswapd_wait, &wait);
-					prepare_to_wait(&pgdat->kswapd_wait, &wait, TASK_INTERRUPTIBLE);
-				}
-
-				/*
-				 * After a short sleep, check if it was a
-				 * premature sleep. If not, then go fully
-				 * to sleep until explicitly woken up
-				 */
-				if (!sleeping_prematurely(pgdat, order, remaining)) {
-					trace_mm_vmscan_kswapd_sleep(pgdat->node_id);
-					schedule();
-				} else {
-					if (remaining)
-						count_vm_event(KSWAPD_LOW_WMARK_HIT_QUICKLY);
-					else
-						count_vm_event(KSWAPD_HIGH_WMARK_HIT_QUICKLY);
-				}
-			}
-
+			kswapd_try_to_sleep(pgdat, order, classzone_idx);
 			order = pgdat->kswapd_max_order;
+			classzone_idx = pgdat->classzone_idx;
+			pgdat->kswapd_max_order = 0;
+			pgdat->classzone_idx = pgdat->nr_zones - 1;
 		}
-		finish_wait(&pgdat->kswapd_wait, &wait);
 
 		ret = try_to_freeze();
 		if (kthread_should_stop())
@@ -3137,7 +3697,7 @@ static int kswapd(void *p)
 		 */
 		if (!ret) {
 			trace_mm_vmscan_kswapd_wake(pgdat->node_id, order);
-			balance_pgdat(pgdat, order);
+			order = balance_pgdat(pgdat, order, &classzone_idx);
 		}
 	}
 	return 0;
@@ -3146,23 +3706,26 @@ static int kswapd(void *p)
 /*
  * A zone is low on free memory, so wake its kswapd task to service it.
  */
-void wakeup_kswapd(struct zone *zone, int order)
+void wakeup_kswapd(struct zone *zone, int order, enum zone_type classzone_idx)
 {
 	pg_data_t *pgdat;
 
 	if (!populated_zone(zone))
 		return;
 
-	pgdat = zone->zone_pgdat;
-	if (zone_watermark_ok(zone, order, low_wmark_pages(zone), 0, 0))
-		return;
-	if (pgdat->kswapd_max_order < order)
-		pgdat->kswapd_max_order = order;
-	trace_mm_vmscan_wakeup_kswapd(pgdat->node_id, zone_idx(zone), order);
 	if (!cpuset_zone_allowed_hardwall(zone, GFP_KERNEL))
 		return;
+	pgdat = zone->zone_pgdat;
+	if (pgdat->kswapd_max_order < order) {
+		pgdat->kswapd_max_order = order;
+		pgdat->classzone_idx = min(pgdat->classzone_idx, classzone_idx);
+	}
 	if (!waitqueue_active(&pgdat->kswapd_wait))
 		return;
+	if (zone_watermark_ok_safe(zone, order, low_wmark_pages(zone), 0, 0))
+		return;
+
+	trace_mm_vmscan_wakeup_kswapd(pgdat->node_id, zone_idx(zone), order);
 	wake_up_interruptible(&pgdat->kswapd_wait);
 }
 
@@ -3408,6 +3971,8 @@ static int __zone_reclaim(struct zone *zone, gfp_t gfp_mask, unsigned int order)
 		.order = order,
 	};
 	unsigned long nr_slab_pages0, nr_slab_pages1;
+
+
 
 	cond_resched();
 	/*
