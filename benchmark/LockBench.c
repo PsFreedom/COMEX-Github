@@ -10,6 +10,7 @@ int main(int argc, char *argv[]){
 	totalInt = N_Pages*1024;
 	
 	Mem_Area = (int*)malloc(sizeof(int)*totalInt);
+	mlock(Mem_Area, sizeof(int)*totalInt);
 	
 	for(i=0; i<totalInt; i++){
 		Mem_Area[i] = 1;

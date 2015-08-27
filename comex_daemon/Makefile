@@ -1,8 +1,8 @@
-EXERCISES = ibdevs query_dev qp_att rdma_both requester COMEX_Daemon
+EXERCISES = ibdevs query_dev qp_att rdma_both requester rdma_quit COMEX_Daemon COMEX_Client
 
 CC=gcc
 
-CFLAGS= -Wall -g 
+CFLAGS = -Wall -g 
 LIBS= -libverbs 
 EXTRA_LIBS = -lrdmacm
 
@@ -19,7 +19,13 @@ qp_att: qp_att.c
 
 rdma_both: rdma_both.c
 	$(CC) -o $@ $< $(CFLAGS) $(LIBS) $(EXTRA_LIBS)
+	
+rdma_quit: rdma_quit.c
+	$(CC) -o $@ $< $(CFLAGS) $(LIBS) $(EXTRA_LIBS)
 
+COMEX_Client: COMEX_Client.c
+	$(CC) -o $@ $< $(CFLAGS) $(LIBS) $(EXTRA_LIBS)
+	
 COMEX_Daemon: COMEX_Daemon.c
 	$(CC) -o $@ $< $(CFLAGS) $(LIBS) $(EXTRA_LIBS)
 

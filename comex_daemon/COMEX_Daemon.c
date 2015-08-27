@@ -1,4 +1,4 @@
-#include "RDMA_COMEX.h"
+#include "RDMA_COMEX_both.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,8 +13,6 @@
 #define NETLINK_COMEX	28
 #define MAX_PAYLOAD 	200 /* maximum payload size*/
 
-#define NodeID 0
-#define N_Nodes 2
 #define MAX_BUFFER 1024
 
 int sock_fd;
@@ -79,10 +77,10 @@ int init_Netlink(){
 	return 1;
 }
 
-void fill_COMEX_freelist(int remoteID, unsigned long remoteAddr, int nPages){
+void fill_COMEX_freelist(int remoteID, unsigned long remoteAddr, int order){
 	char myMessage[200];
 	
-	sprintf(myMessage, "100 %d %lu %d", remoteID, remoteAddr, nPages);
+	sprintf(myMessage, "100 %d %lu %d", remoteID, remoteAddr, order);
 	printf("%s\n", myMessage);
 	sendNLMssge(myMessage);
 }
@@ -95,15 +93,19 @@ void recv_request(int Order){
 	sendNLMssge(myMessage);
 }
 
-int main(int argc, char *argv[]){
-	int i;
-	unsigned long N_Pages, totalInt, Checksum=0;
+int main(int argc, char *argv[])
+{
+	int i, shmid, totalCB, nodeID;
+	struct rdma_cb **cb_pointers;
+	unsigned long N_Pages, totalInt; //, Checksum=0;
 	unsigned long totalCOMEX, totalBuffer, totalMem;
 	char myMessage[200];
+	key_t key = 5683;
 	
-	struct rdma_cb *RDMA_cb;
-
 	N_Pages = strtol(argv[1], NULL, 10);	// Number of Pages as input.
+	totalCB = atoi(argv[2]);
+	nodeID = atoi(argv[3]);
+	
 	N_Pages = N_Pages / 1024;				// Make it multiple of 1024.
 	N_Pages = N_Pages * 1024;				// Make it multiple of 1024.
 	totalInt = N_Pages * 1024;				// int => 4 bytes * 1024 = 1 page
@@ -113,7 +115,16 @@ int main(int argc, char *argv[]){
 	totalBuffer = sizeof(int)*1024*MAX_BUFFER;
 	totalMem = totalCOMEX + totalBuffer;
 	
-	COMEX_Area = (int*)malloc(totalMem);	// Mem allocation
+	if ((shmid = shmget(key, totalMem, IPC_CREAT | 0666)) < 0) {
+        perror("shmget");
+        exit(1);
+    }
+	if ((COMEX_Area = shmat(shmid, NULL, 0)) == (int *) -1) {
+        perror("shmat");
+        exit(1);
+    }
+	
+//	COMEX_Area = (int*)malloc(totalMem);	// Mem allocation
 	COMEX_Buffer = COMEX_Area + totalInt;
 //	mlock(COMEX_Area, totalMem);
 	for(i=0; i<totalInt + (1024*MAX_BUFFER); i++){
@@ -123,25 +134,32 @@ int main(int argc, char *argv[]){
 	
 	init_Netlink();
 	init_SignalHandler();
-
-	sprintf(myMessage, "%d %d %d %lu %lu %lu %d", 0, NodeID, N_Nodes, COMEX_Area, &COMEX_Area[(N_Pages-1)*1024], COMEX_Buffer, MAX_BUFFER);
+	sprintf(myMessage, "%d %d %d %lu %lu %lu %d", 0, nodeID, totalCB, COMEX_Area, &COMEX_Area[(N_Pages-1)*1024], COMEX_Buffer, MAX_BUFFER);
 	printf("%s\n", myMessage);
 	sendNLMssge(myMessage);
-	
-	RDMA_cb = create_control_block();
-	RDMA_cb->rdma_buf_len = totalMem;
-	RDMA_cb->rdma_buffer = COMEX_Buffer;
-	RDMA_cb->sin.sin_port = LISTEN_PORT;
-	startRDMA(RDMA_cb);
 
-/*	while(1){
-		printf("Checksum = %ld \n", Checksum);
-		for(i=0; i < totalInt+(1024*MAX_BUFFER); i++){
-			Checksum = Checksum + COMEX_Area[i];
-		}
-		sleep(60);
-	}
-*/	
+	printf("totalMem: %lu\n", totalMem);
+	cb_pointers = startRDMA_Server(totalCB, nodeID, totalMem,COMEX_Area);
+	
 	close(sock_fd);
 	return 0;
 }
+
+
+
+
+
+
+
+
+
+
+
+//	while(1){
+//		Checksum = 0;
+//		for(i=0; i < totalInt+(1024*MAX_BUFFER); i++){
+//			Checksum = Checksum + COMEX_Area[i];
+//		}
+//		printf("Checksum = %ld \n", Checksum);
+//		sleep(60);
+//	}

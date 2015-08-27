@@ -1,17 +1,24 @@
+#include "RDMA_COMEX_both.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <linux/netlink.h>
 
+#include <unistd.h>
+
 #define NETLINK_COMEX_KERNEL	29
 #define MAX_PAYLOAD 200 /* maximum payload size*/
+#define NORMAL_MSG 5
 
 struct sockaddr_nl src_addr, dest_addr;
 struct nlmsghdr *nlh = NULL;
 struct iovec iov;
 struct msghdr msg;
 int sock_fd;
+
+struct rdma_cb **cb_pointers;
+char RDMAmsg[64];
 
 int init_NetLink(){
 
@@ -48,12 +55,31 @@ int init_NetLink(){
     sendmsg(sock_fd, &msg, 0);
 }
 
-int main(){	
-    init_NetLink();
+void sendRDMA(int NodeID, int imm){
+	strcpy((cb_pointers[NodeID]->send_buffer).piggy, RDMAmsg);
+	do_sendout(cb_pointers[NodeID], imm);
+}
+
+int main(int argc, char *argv[])
+{
+	int totalCB, nodeID, i;
+	unsigned long totalMem;
+	
+	totalMem = strtol(argv[1], NULL, 10);
+	totalCB = atoi(argv[2]);
+	nodeID = atoi(argv[3]);	
+	
+	cb_pointers = startRDMA_Client(totalCB, nodeID, totalMem);	
+
+	init_NetLink();
     while(1){
+		for(i=0; i<totalCB; i++){
+			sprintf(RDMAmsg,"Hello msg from node %d\n", nodeID); sendRDMA(i, 1000);
+		}
 		printf("Waiting for message from kernel...\n");
-		recvmsg(sock_fd, &msg, 0);
-		printf(" Received message payload: %s\n", NLMSG_DATA(nlh));
+		recvmsg(sock_fd, &msg, 0);		
+		printf(" Received message payload: %s\n", NLMSG_DATA(nlh));				
     }
-    close(sock_fd);
+    close(sock_fd);		
+	return 0;
 }

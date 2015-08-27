@@ -16,6 +16,7 @@
 
 unsigned int COMEX_PID = 0;
 struct sock *nl_sk = NULL;
+static struct netlink_kernel_cfg cfg = {0};
 
 unsigned long getParamFromPacketData(struct sk_buff *skb, int Position){
 	struct nlmsghdr *nlh = (struct nlmsghdr *)skb->data;
@@ -95,7 +96,9 @@ static void nl_recv_msg(struct sk_buff *skb)
 static int __init init_main(void)
 {	
 	printk(KERN_INFO "COMEX Kernel module V.0.1\n");
-	nl_sk = netlink_kernel_create(&init_net, NETLINK_COMEX, 0, nl_recv_msg, NULL, THIS_MODULE);
+	cfg.input = nl_recv_msg;
+//	nl_sk = netlink_kernel_create(&init_net, NETLINK_COMEX, 0, nl_recv_msg, NULL, THIS_MODULE);
+	nl_sk = netlink_kernel_create(&init_net, NETLINK_COMEX, &cfg);
 	if(nl_sk == NULL){
 		printk(KERN_ALERT "Error creating socket.\n");
 		return -1;

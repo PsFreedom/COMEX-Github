@@ -34,7 +34,7 @@
 
 #define PORTOFFSET 62000
 //#define BUF_LEN 17179869184ll
-#define BUF_LEN  2147483648  //must be multiple of SEND_SIZE as of now.
+#define BUF_LEN  2048  //must be multiple of SEND_SIZE as of now.
 //#define BUF_LEN 17179869184
 //#define VERBOSE 1
 int work=1; // if set=0, init then  end, don't do the workload.
@@ -1089,6 +1089,7 @@ init_mq_receiver();
 
     }
 
+scanf("%d");
 	for(i=0;i<cbcount;i++){
         err=do_write_imm(cb[i],-1);
         if(err){

@@ -1,20 +1,22 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+//#include <stdio.h>
+//#include <stdlib.h>
+//#include <string.h>
 #include <errno.h>
-#include <sys/socket.h>
+//#include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include<inttypes.h>
+#include <inttypes.h>
 #include <infiniband/verbs.h>
 #include <infiniband/arch.h>
 #include <rdma/rdma_cma.h>
-#include<sys/ipc.h>
-#include<sys/shm.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 #include <sys/msg.h> // message queue
 
-#include <unistd.h>
+//#include <unistd.h>
 
+#include "IP_Port.h"
+#include "COMEX_lib.h"
 
 /*
  * Defines
@@ -33,10 +35,10 @@
 #define SHAREDMEM 1
 
 #define PORTOFFSET 62000
-//#define BUF_LEN 17179869184ll
-#define BUF_LEN  2147483648  //must be multiple of SEND_SIZE as of now.
-//#define BUF_LEN 17179869184
-//#define VERBOSE 1
+unsigned long BUF_LEN;
+int *COMEX_Area = NULL;
+
+#define VERBOSE 1
 int work=1; // if set=0, init then  end, don't do the workload.
 int myinstanceNo;
 struct buffer {
@@ -363,26 +365,41 @@ ib_setup_common(struct rdma_cb *cb,struct ibv_comp_channel *cc,struct ibv_cq *cq
 	cb->rdma_packet_len = strlen(SEND_STR)+1;	/* +1 for NULL Char */
 	//cb->rdma_buffer = malloc(cb->rdma_buf_len);
 	cb->rdma_buf_len = BUF_LEN;
-	#ifdef SHAREDMEM
 	int shmid;
-	if ((shmid = shmget(SHMKEY, BUF_LEN, 0666)) < 0) {
-       		perror("shmget");
-        	exit(1);
-    	}
-    	if ((cb->rdma_buffer = shmat(shmid, NULL, 0)) == (char *) -1) {
-        	perror("shmat");
-        	exit(1);
-    	}
-
-	#else
-	cb->rdma_buffer = malloc(BUF_LEN);
-	#endif
+	//if ((shmid = shmget(SHMKEY, BUF_LEN, 0666 | IPC_CREAT)) < 0) {
+	if(COMEX_Area==NULL){
+		if ((shmid = shmget(SHMKEY, BUF_LEN, 0666 )) < 0) {
+				perror("shmget");
+				exit(1);
+			}
+		if ((cb->rdma_buffer = shmat(shmid, NULL, 0)) == (char *) -1) {
+			perror("shmat");
+			exit(1);
+		}
+		#ifdef VERBOSE
+			printf("COMEX AREA is null, registered at%p\n",cb->rdma_buffer);
+		#endif
+	}else{
+		#ifdef VERBOSE
+			printf("COMEX AREA is %p\n",COMEX_Area);
+		#endif
+		cb->rdma_buffer = COMEX_Area;
+	}	
+	printf("cb->rdma_mr= %p\n",cb->rdma_mr);
 	if (!cb->rdma_buffer) {
 		fprintf(stderr, "Error allocating rdma buffer\n");
 		return -1;
 	}
+	// original
+	 cb->rdma_mr = ibv_reg_mr(cb->pd, cb->rdma_buffer, cb->rdma_buf_len,
+					IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ| IBV_ACCESS_REMOTE_WRITE );
+	
+	//test
+	/*
 	cb->rdma_mr = ibv_reg_mr(cb->pd, cb->rdma_buffer, cb->rdma_buf_len,
-					IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ| IBV_ACCESS_REMOTE_WRITE);
+					IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ| IBV_ACCESS_REMOTE_WRITE| IBV_ACCESS_MW_BIND );
+	*/
+	printf("cb->rdma_mr= %p\n",cb->rdma_mr);
 	if (!cb->rdma_mr) {
 		fprintf(stderr, "Error registering rdma buffer\n");
 		return -1;
@@ -617,9 +634,10 @@ int getRDMAinfo(struct rdma_cb *cb ){
  */
     int err;
     int retqpno;
+	int retimm;
 	fprintf(stdout, "Waiting for other side rdma buffer info\n");
 	//
-	err = do_completion(cb,0,&retqpno);
+	err = do_completion(cb,&retimm,&retqpno);
 	if (err) {
 		return 1;
 	}
@@ -633,6 +651,7 @@ int sendRDMAinfo(struct rdma_cb *cb ){
  * Pass RDMA buffer information to the other side
  */
         int retqpno;
+		int retimm;
         int err;
         cb->send_buffer.addr  = htonll((uint64_t)cb->rdma_buffer);
         cb->send_buffer.length = htonl(cb->rdma_buf_len);
@@ -644,7 +663,7 @@ int sendRDMAinfo(struct rdma_cb *cb ){
         if (err) {
                 return 1;
         }
-        err = do_completion(cb,0,&retqpno);
+        err = do_completion(cb,&retimm,&retqpno);
         if (err) {
                 return 1;
         }
@@ -756,6 +775,7 @@ int err;
 int do_write_imm(struct rdma_cb *cb,int immediate){
 int err;
 int retqpno;
+int retimm;
 #ifdef VERBOSE
         fprintf(stdout, "Issuing an RDMA Write with immediate to the server\n");
 #endif
@@ -766,8 +786,9 @@ int retqpno;
 /*
  * Check our write completion
  */
-        err = do_completion(cb,0,&retqpno);
+        err = do_completion(cb,&retimm,&retqpno);
         if (err) {
+			printf("error in write withimm completion");
                 return 1;
         }
 return 0;
@@ -787,6 +808,7 @@ int err;
 int do_write(struct rdma_cb *cb,int ouroffset,int remoteoffset,int size){
 int err;
 int retqpno;
+int retimm;
 #ifdef VERBOSE
         fprintf(stdout, "Issuing an RDMA Write to the server\n");
 #endif
@@ -794,30 +816,34 @@ int retqpno;
         if (err) {
                 return 1;
         }
-    err = do_completion(cb,0,&retqpno);
+    err = do_completion(cb,&retimm,&retqpno);
         if (err) {
                 return 1;
         }
 return 0;
 }
 // verb send, accept through do_completion then values are stored in cb->recv_buffer.piggy
-int do_sendout(struct rdma_cb *cb,int size,int imm){
+int do_sendout(struct rdma_cb *cb,int imm){
     int err;
     int retqpno;
-    err= do_send(cb, IBV_WR_SEND_WITH_IMM,0,size,imm);
+	int retimm;
+    err= do_send(cb, IBV_WR_SEND_WITH_IMM,0,0,imm);
         if (err) {
+			printf("error!");
                 return 1;
         }
 
-    err = do_completion(cb,0,&retqpno);
+    err = do_completion(cb,&retimm,&retqpno);
         if (err) {
+		
+			printf("error2!");
                 return 1;
     }
     return 0;
 }
 
 int init_mq_sender(){
-    if ((key = ftok("rdma_both", 'B')) == -1) {
+    if ((key = ftok("query_dev.c", 'B')) == -1) {
         perror("ftok");
         exit(1);
     }
@@ -828,7 +854,7 @@ int init_mq_sender(){
 return 0;
 }
 int init_mq_receiver(){
-    if ((key = ftok("rdma_both.c", 'B')) == -1) { // same
+    if ((key = ftok("query_dev.c", 'B')) == -1) { // same
             perror("ftok");
         exit(1);
     }
@@ -895,8 +921,11 @@ do_server(struct rdma_cb *cb[0],int cbcount) {
         }
 
         switch(retval){  //this is what i expected from otherside's verb send
+            case 1000:
+				COMEX_server_handler(qp2cb(retqpno)->recv_buffer.piggy);
+            break;
             case 5:
-                printf("piggy=%s\n",cb[0]->recv_buffer.piggy);
+                printf("piggy = %s\n",qp2cb(retqpno)->recv_buffer.piggy);
             break;
             case -1:
                 printf("get disconnect msg\n"); // should be modify to handle more than one connection
@@ -1059,20 +1088,28 @@ do_client(struct rdma_cb *cb[],int cbcount) {
         //strncpy(cb[i]->rdma_buffer, RDMA_STRING, cb[i]->rdma_buf_len);
         err=sendRDMAinfo(cb[i]);
         if(err){
+			printf("sendRDMAinfo\n");
             return 1;
         }
         err=getRDMAinfo(cb[i]);
         if(err){
+			printf("getRDMAinfo\n");
             return 1;
         }
+		
+//		printf("x\n");
         err=do_write_imm(cb[i],myinstanceNo); // send id
         if(err){
+			printf("do_write_imm\n");
             return 1;
         };
+//		printf("y\n");
         err=get_write_imm(cb[i],&f); // get id
         if(err){
+			printf("get_write_imm\n");
             return 1;
         };
+//		printf("z\n");
         cb[i]->instanceNo=f;
         printf("InstanceNo=%d\n",cb[i]->instanceNo);
  	}
@@ -1081,61 +1118,73 @@ init_mq_receiver();
  	////////////////////////////
 // do something here
     if(work==1){
-            /* //example of how to send a message
-        char tmpstr[40]="test bug one two three";
-        strcpy((cb[0]->send_buffer).piggy,tmpstr); //or memcpy or whatever
-        do_sendout(cb[0],24,5);
-            */
+             //example of how to send a message
+        //char tmpstr[40]="test bug one two three";
+        //strcpy((cb[0]->send_buffer).piggy, tmpstr); //or memcpy or whatever
+        //do_sendout(cb[0],24,5); //edit 24
+            
 
     }
-
+//	printf("here\n");
+	/*
+ //disconnect msg
 	for(i=0;i<cbcount;i++){
         err=do_write_imm(cb[i],-1);
         if(err){
             return client_disconnect(cb[0]);
         }
 	}
+	
+	
 //////////////////////////////////////////////////////////////////////////////////////
     //
     for(i=cbcount-1;i>0;i--){
         client_disconnect(cb[i]);
     }
+	
     return client_disconnect(cb[0]);
+	*/
+	return 0;
 }
 
-int allinit(struct rdma_cb *cb[],int cbcount,int startport,char **argv){
+int allinit(struct rdma_cb *cb[],int cbcount,int startport){
     int err,i,plus=0;
 /*
  * common setup
  */
     for(i=0;i<cbcount;i++){
-	cb[i]->sin.sin_family = AF_INET;
+		cb[i]->sin.sin_family = AF_INET;
     }
 /*
  * Run client/server specific code
  */
-	if (cb[0]->is_server) {
-        for(i=0;i<cbcount;i++){
+	if (cb[0]->is_server) {			// Server
+        for(i=0; i<cbcount; i++){
             cb[i]->sin.sin_port = startport+i;
         }
-		err = do_server(cb,cbcount);
-	} else {
-	    for(i=0;i<cbcount;i++){
-            cb[i]->sin.sin_port = startport+ atoi(argv[4+i*2]);
-            err = inet_aton(argv[3+i*2], &cb[i]->sin.sin_addr);
+		err = do_server(cb, cbcount);
+	} 
+	else {							// Client
+	    for(i=0; i<cbcount; i++){	
+            cb[i]->sin.sin_port = startport+ atoi(allPort[i]);
+            err = inet_aton(allIP[i], &cb[i]->sin.sin_addr);
             if (!err) {
-                fprintf(stderr, "inet_aton failed on address: %s\n", argv[3+i*2]);
+                fprintf(stderr, "inet_aton failed on address: %s\n", allIP[i]);
                 return 1;
             }
         }
 		err = do_client(cb,cbcount);
+		if(err){
+			fprintf(stderr, "Error - %d\n", err);
+		}
 	}
-return 0;
+	
+	return err;
 }
 // argv[1] first arg= number of instance
 // argv[2] second= instanceNo
 // argv[3],[4] third+= more IP and port offset (s)
-
+/*
 int
 main(int argc, char **argv) {
 
@@ -1143,20 +1192,16 @@ main(int argc, char **argv) {
 	int err = 0,i,cbcount;
 	cbcount=atoi(argv[1]);
 	myinstanceNo=atoi(argv[2]);
-/*
- * Allocate an initialize the control block structure
- */
- for(i=0;i<cbcount;i++){
-	cb[i] = malloc(sizeof(*cb[i]));
-	if (!cb[i]) {
-		fprintf(stderr, "Could not allocate memory for the control block\n");
-		return -1;
+
+	for(i=0;i<cbcount;i++){
+		cb[i] = malloc(sizeof(*cb[i]));
+		if (!cb[i]) {
+			fprintf(stderr, "Could not allocate memory for the control block\n");
+			return -1;
+		}
+		memset(cb[i], 0, sizeof(*cb[i]));
 	}
-	memset(cb[i], 0, sizeof(*cb[i]));
-}
-/*
- * Validate the command line
- */
+
 	if (argc == 3) {
 		fprintf(stdout, "Starting Server\n");
         for(i=0;i<cbcount;i++){
@@ -1173,4 +1218,56 @@ out:
         cleanup_common(cb[i]);
 	}
 	return err;
+}
+*/
+
+struct rdma_cb **  startRDMA_Server(int totalNodes, int nodeID, unsigned long totalMem,int* COMEXAREA) {
+	struct rdma_cb **cb_pointers;
+	int i;
+	
+	myinstanceNo = nodeID;
+	BUF_LEN = totalMem;
+	COMEX_Area = COMEXAREA;
+	cb_pointers = (struct rdma_cb **)malloc(sizeof(struct rdma_cb *)*totalNodes);
+	for(i=0; i<totalNodes; i++){
+		cb_pointers[i] = (struct rdma_cb *)malloc(sizeof(struct rdma_cb));
+		if(!cb_pointers[i]){
+			fprintf(stderr, "Could not allocate memory for the control block\n");
+			return -1;
+		}
+		memset(cb_pointers[i], 0, sizeof(struct rdma_cb));		
+		cb_pointers[i]->is_server = 1;
+	}	
+	allinit(cb_pointers, totalNodes, PORTOFFSET);
+	
+out:
+    for(i=0; i<totalNodes; i++){
+        cleanup_common(cb_pointers[i]);
+	}
+	
+	fprintf(stdout, "startRDMA_Server OK\n");
+	return cb_pointers;	
+}
+
+struct rdma_cb ** startRDMA_Client(int totalNodes, int nodeID, unsigned long totalMem) {
+	struct rdma_cb **cb_pointers;
+	int i;
+	
+	myinstanceNo = nodeID;
+	BUF_LEN = totalMem;
+	COMEX_Area = NULL;
+	
+	cb_pointers = (struct rdma_cb **)malloc(sizeof(struct rdma_cb *)*totalNodes);
+	for(i=0; i<totalNodes; i++){
+		cb_pointers[i] = (struct rdma_cb *)malloc(sizeof(struct rdma_cb));
+		if(!cb_pointers[i]){
+			fprintf(stderr, "Could not allocate memory for the control block\n");
+			return -1;
+		}
+		memset(cb_pointers[i], 0, sizeof(struct rdma_cb));
+	}
+	
+	allinit(cb_pointers, totalNodes, PORTOFFSET);
+	fprintf(stdout, "startRDMA_Client OK\n");
+	return cb_pointers;	
 }
