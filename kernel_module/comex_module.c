@@ -18,37 +18,33 @@ unsigned int COMEX_PID = 0;
 struct sock *nl_sk = NULL;
 static struct netlink_kernel_cfg cfg = {0};
 
-unsigned long getParamFromPacketData(struct sk_buff *skb, int Position){
+unsigned long getParamFromPacketData(struct sk_buff *skb, int pos){
 	struct nlmsghdr *nlh = (struct nlmsghdr *)skb->data;
-	char myMessage[256];
-	int i=0, first=0, last=0;
+	int start=0, end=0;
+	char msgBuff[256];
+
+	strcpy(msgBuff, (char *)nlmsg_data(nlh));
+	while(pos > 0){
+		if(msgBuff[start] == ' '){
+			pos--;
+		}
+		start++;
+	}
+	end = start+1;
+	while(msgBuff[end] != ' ' && msgBuff[end] != '\0'){
+		end++;
+	}
+	end--;
 	
-	strcpy(myMessage, (char *)nlmsg_data(nlh));		
-	while(Position > 0){
-		if(myMessage[i] == ' '){
-			Position--;
-			if(Position == 0){
-				first = i+1;
-			}
-		}
-		i++;
-	}	
-	while(Position == 0){
-		if((myMessage[i] == ' ') || (myMessage[i] == '\0')){
-			Position--;
-			last = i-1;
-		}
-		i++;
-	}	
-	return simple_strtoul(&myMessage[first], &myMessage[last], 10);
+	return simple_strtoul(&msgBuff[start], &msgBuff[end], 10);
 }
 
 static void nl_recv_msg(struct sk_buff *skb)
 {
 	unsigned long cmdNumber;
-	unsigned long NodeID, N_Nodes, COMEX_Address, COMEX_Address_End, Buffer_Address, MaxBuffer;
-	unsigned long RemoteID, RemoteAddr, nPages;
-	unsigned long requestOrder;
+	unsigned long NodeID, N_Nodes, COMEX_Address, COMEX_Address_End, Buffer_Address, MaxBuffer;	// for case 0: 
+	unsigned long RemoteID, RemoteAddr, nPages;		// for case 100:
+	unsigned long requester, Order;	// for case 1100:
 	
 	struct nlmsghdr *nlh = (struct nlmsghdr *)skb->data;
 	
@@ -78,14 +74,15 @@ static void nl_recv_msg(struct sk_buff *skb)
 			
 			printk(KERN_INFO "%s: RemoteID %lu ", __FUNCTION__, RemoteID);
 			printk(KERN_INFO "%s: RemoteAddr %lu nPages %lu", __FUNCTION__, RemoteAddr, nPages);
-			
-			COMEX_recv_fill((int)RemoteID, RemoteAddr, (int)nPages);
+//			COMEX_recv_fill((int)RemoteID, RemoteAddr, (int)nPages);
 			break;
 			
-		case 200:
-			requestOrder = getParamFromPacketData(skb, 1);
+		case 1100:
+			requester = getParamFromPacketData(skb, 1);
+			Order = getParamFromPacketData(skb, 2);
 			
-			COMEX_recv_asked((int)requestOrder);
+//			printk(KERN_INFO "%s: requester %lu Order %lu\n", __FUNCTION__, requester, Order);
+			COMEX_recv_asked((int)requester, (int)Order);
 			break;
 			
 		default:

@@ -35,8 +35,11 @@
 #define SHAREDMEM 1
 
 #define PORTOFFSET 62000
+
+//////////////////// for COMEX
 unsigned long BUF_LEN;
-int *COMEX_Area = NULL;
+char *COMEX_Area = NULL;
+//////////////////// for COMEX
 
 #define VERBOSE 1
 int work=1; // if set=0, init then  end, don't do the workload.
@@ -921,9 +924,14 @@ do_server(struct rdma_cb *cb[0],int cbcount) {
         }
 
         switch(retval){  //this is what i expected from otherside's verb send
-            case 1000:
-				COMEX_server_handler(qp2cb(retqpno)->recv_buffer.piggy);
+#ifdef IS_SERVER
+            case 2000:
+				COMEX_server_msg(qp2cb(retqpno)->recv_buffer.piggy);
             break;
+            case 1000:
+				COMEX_server_cmd(qp2cb(retqpno)->recv_buffer.piggy);
+            break;
+#endif
             case 5:
                 printf("piggy = %s\n",qp2cb(retqpno)->recv_buffer.piggy);
             break;
@@ -1221,7 +1229,7 @@ out:
 }
 */
 
-struct rdma_cb **  startRDMA_Server(int totalNodes, int nodeID, unsigned long totalMem,int* COMEXAREA) {
+struct rdma_cb **  startRDMA_Server(int totalNodes, int nodeID, unsigned long totalMem, char* COMEXAREA) {
 	struct rdma_cb **cb_pointers;
 	int i;
 	

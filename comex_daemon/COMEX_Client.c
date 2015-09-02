@@ -11,11 +11,11 @@
 #define MAX_PAYLOAD 200 /* maximum payload size*/
 #define NORMAL_MSG 5
 
+int sock_fd;
 struct sockaddr_nl src_addr, dest_addr;
 struct nlmsghdr *nlh = NULL;
 struct iovec iov;
 struct msghdr msg;
-int sock_fd;
 
 struct rdma_cb **cb_pointers;
 char RDMAmsg[64];
@@ -63,6 +63,7 @@ void sendRDMA(int NodeID, int imm){
 int main(int argc, char *argv[])
 {
 	int totalCB, nodeID, i;
+	int cmdNo, target, order;
 	unsigned long totalMem;
 	
 	totalMem = strtol(argv[1], NULL, 10);
@@ -70,15 +71,29 @@ int main(int argc, char *argv[])
 	nodeID = atoi(argv[3]);	
 	
 	cb_pointers = startRDMA_Client(totalCB, nodeID, totalMem);	
-
+	for(i=0; i<totalCB; i++){
+		sprintf(RDMAmsg,"Hello msg from node %d\n", nodeID); sendRDMA(i, 2000);
+	}
+	
 	init_NetLink();
+	recvmsg(sock_fd, &msg, 0);		
+	printf("   Received message payload: %s\n", NLMSG_DATA(nlh));
     while(1){
-		for(i=0; i<totalCB; i++){
-			sprintf(RDMAmsg,"Hello msg from node %d\n", nodeID); sendRDMA(i, 1000);
+		recvmsg(sock_fd, &msg, 0);
+		printf("   %s: %s\n", __FUNCTION__, NLMSG_DATA(nlh));
+		cmdNo = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 0);
+		switch(cmdNo){
+			case 1100:
+				target = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 1);
+				order = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 2);
+				
+//				printf("   Request Target %d size %d\n", target, order);
+				sprintf(RDMAmsg,"1100 %d %d\n", nodeID, order); sendRDMA(target, 1000);
+			break;
+			default:
+				printf(">>> default: %s\n", NLMSG_DATA(nlh));
+			break;
 		}
-		printf("Waiting for message from kernel...\n");
-		recvmsg(sock_fd, &msg, 0);		
-		printf(" Received message payload: %s\n", NLMSG_DATA(nlh));				
     }
     close(sock_fd);		
 	return 0;

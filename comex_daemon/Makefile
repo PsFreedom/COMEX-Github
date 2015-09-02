@@ -2,7 +2,7 @@ EXERCISES = ibdevs query_dev qp_att rdma_both requester rdma_quit COMEX_Daemon C
 
 CC=gcc
 
-CFLAGS = -Wall -g 
+CFLAGS = -g 
 LIBS= -libverbs 
 EXTRA_LIBS = -lrdmacm
 

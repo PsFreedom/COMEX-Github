@@ -3,24 +3,21 @@
 #include <string.h>
 
 int main(int argc, char *argv[]){	
-	int i, *Mem_Area;
-	unsigned long N_Pages, totalInt;
+	char *Mem_Area;
+	unsigned long i, j, N_Pages, totalChar;
 	
 	N_Pages = strtol(argv[1], NULL, 10);
-	totalInt = N_Pages*1024;
+	totalChar = N_Pages*4096;
+	Mem_Area = (char *)malloc(sizeof(char)*totalChar);
 	
-	Mem_Area = (int*)malloc(sizeof(int)*totalInt);
-	
-	for(i=0; i<totalInt; i++){
-		Mem_Area[i] = 1;
+	for(i=0, j=0; i<totalChar; i+=4096, j++){
+		Mem_Area[i] = j;
 	}
 	while(1){
-		printf("Mem_Area[i] %d\n", Mem_Area[0]);		
-		for(i=0; i<totalInt; i++){
-			Mem_Area[i] = Mem_Area[i] + 1;
+		for(i=0; i<totalChar; i+=4096){		
+			Mem_Area[i]++;
 		}
 		sleep(20);
-	}
-	
+	}	
 	return 0;
 }

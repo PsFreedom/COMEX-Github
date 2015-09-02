@@ -68,7 +68,6 @@
 #define X86PageSize 4096
 #define COMEX_MAX_ORDER 11
 #define Biggest_Group 1024
-#define MAX_Remote_Nodes 1024
 
 ////////// COMEX //////////
 
@@ -737,8 +736,8 @@ typedef struct COMEX_remote_list_header{
 	int PageCounter;	
 	int requestLock;
 } COMEX_R_Header;
-COMEX_R_Header COMEX_Freelist[MAX_Remote_Nodes];
-COMEX_R_Header COMEX_Usedlist[MAX_Remote_Nodes];
+COMEX_R_Header *COMEX_Freelist;//[MAX_Remote_Nodes];
+COMEX_R_Header *COMEX_Usedlist;//[MAX_Remote_Nodes];
 
 typedef struct COMEX_buffer_descriptor{
 	struct page *pageDesc;
@@ -784,8 +783,7 @@ int COMEX_move_to_Remote(struct page *page){
 	COMEX_R_page *R_page;
 	
 	firstPID = get_Frist_PID(page);
-	listNO = COMEX_Hash(COMEX_Node_ID, firstPID);	
-//	printk(KERN_INFO "%s: firstPID %d, Target %d, Page %lu", __FUNCTION__, firstPID, listNO, page);
+	listNO = COMEX_Hash(COMEX_Node_ID, firstPID);
 	for(i=0; i<JumpThreshold; i++){
 		if(COMEX_Freelist[listNO].PageCounter > 0){
 			
@@ -829,7 +827,7 @@ int COMEX_move_to_Remote(struct page *page){
 		}
 		else if(COMEX_Freelist[listNO].requestLock == 0){
 			COMEX_Freelist[listNO].requestLock = 1;
-			sprintf(NetlinkMSG, "1000 %d %d", listNO, Order);
+			sprintf(NetlinkMSG, "1100 %d %d ", listNO, Order);
 			NL_send_message();
 		}
 		listNO = COMEX_Hash(listNO, firstPID);
@@ -860,15 +858,18 @@ void COMEX_recv_fill(int RemoteID, unsigned long RemoteAddr, int order){
 }
 EXPORT_SYMBOL(COMEX_recv_fill);
 
-void COMEX_recv_asked(int order){
+void COMEX_recv_asked(int requester, int order){
 	unsigned long availAddress = 0;
 	
 	if(COMEX_Ready == 1){
+		availAddress = COMEX_get_from_Buddy(order);
 		while(availAddress == 0 && order > 5){
-			availAddress = COMEX_get_from_Buddy(order);
 			order--;
+			availAddress = COMEX_get_from_Buddy(order);
 		}
-		printk(KERN_INFO "%s: Address %lu Order %d", __FUNCTION__, availAddress, order);
+//		printk(KERN_INFO "%s: requester %d Address %lu Order %d", __FUNCTION__, requester,availAddress, order);
+		sprintf(NetlinkMSG, "1101 %d %lu %d ", requester, availAddress, order);
+		NL_send_message();
 	}
 }
 EXPORT_SYMBOL(COMEX_recv_asked);
@@ -1264,6 +1265,8 @@ void init_Remote(void){
 		tmpStartAddr = tmpStartAddr + X86PageSize;
 	}
 	
+	COMEX_Freelist = (COMEX_R_Header *)vmalloc(sizeof(COMEX_R_Header)*COMEX_Total_Nodes);
+	COMEX_Usedlist = (COMEX_R_Header *)vmalloc(sizeof(COMEX_R_Header)*COMEX_Total_Nodes);
 	for(i=0; i<COMEX_Total_Nodes; i++){
 		INIT_LIST_HEAD(&COMEX_Freelist[i].listHeader);
 		INIT_LIST_HEAD(&COMEX_Usedlist[i].listHeader);
@@ -1307,7 +1310,7 @@ static void Kernel_nl_recv_msg(struct sk_buff *skb){
     	COMEX_Ready = 1;
     }
     
-    sprintf(NetlinkMSG, "Init successfully !\n");
+    sprintf(NetlinkMSG, "Init successfully !");
     NL_send_message();
 }
 
@@ -1351,10 +1354,10 @@ void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, u
 	COMEX_buffer_addr = Buffer_Addr;
 	COMEX_MAX_Buffer = MaxBuffer;
 	
-	printk(KERN_INFO "%s: COMEX_Ready %d COMEX_PID %d", __FUNCTION__, COMEX_Ready, COMEX_PID);	
-	printk(KERN_INFO "%s: NodeID %d N_Nodes %d", __FUNCTION__, COMEX_Node_ID, COMEX_Total_Nodes);
-	printk(KERN_INFO "%s: Start address %lu End Address %lu", __FUNCTION__, COMEX_start_addr, endAddr);
-	printk(KERN_INFO "%s: Buffer address %lu Total Buffer %d", __FUNCTION__, COMEX_buffer_addr, MaxBuffer);
+	printk(KERN_INFO "%s: COMEX_Ready %d COMEX_PID %d \n", __FUNCTION__, COMEX_Ready, COMEX_PID);	
+	printk(KERN_INFO "%s: NodeID %d N_Nodes %d \n", __FUNCTION__, COMEX_Node_ID, COMEX_Total_Nodes);
+	printk(KERN_INFO "%s: Start address %lu End Address %lu \n", __FUNCTION__, COMEX_start_addr, endAddr);
+	printk(KERN_INFO "%s: Buffer address %lu Total Buffer %d \n", __FUNCTION__, COMEX_buffer_addr, MaxBuffer);
 	
 	tmpStartAddr = startAddr;
 	nPages = ((endAddr-startAddr) / X86PageSize) +1;
@@ -1479,7 +1482,7 @@ void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, u
 	init_NetLink();
 	
 	Daemon_Ready = 1;
-	COMEX_signal(-1);	// Finish Init signal
+//	COMEX_signal(-1);	// Finish Init signal
 }
 EXPORT_SYMBOL(COMEX_init_ENV);
 
@@ -1757,6 +1760,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			if (!(sc->gfp_mask & __GFP_IO))
 				goto keep_locked;
 			if(COMEX_Ready == 1){
+//				printk(KERN_INFO "%s: COMEX_Ready\n", __FUNCTION__);
 //				if(COMEX_move_to_COMEX(page) == 1){
 //					goto COMEX_Out;
 //				}
