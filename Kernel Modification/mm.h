@@ -1213,7 +1213,7 @@ extern void COMEX_signal(int sigN);
 extern void COMEX_free_to_Buddy(unsigned long pageNO, unsigned int order);
 extern void print_free_blocks(void);
 
-extern void COMEX_recv_fill(int RemoteID, unsigned long RemoteAddr, int nPages);
+extern void COMEX_recv_fill(int RemoteID, unsigned long Offset, int order);
 extern void COMEX_recv_asked(int requester, int order);
 
 int vma_wants_writenotify(struct vm_area_struct *vma);

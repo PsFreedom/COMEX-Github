@@ -78,19 +78,19 @@ int init_Netlink(){
 	return 1;
 }
 
-void fill_COMEX_freelist(int remoteID, unsigned long remoteAddr, int order){
-	char myMessage[200];
-	
-	sprintf(myMessage, "100 %d %lu %d", remoteID, remoteAddr, order);
-	printf("%s\n", myMessage);
-	sendNLMssge(myMessage);
-}
-
 void recv_request(int Requester, int Order){
 	char myMessage[200];
 	
 	sprintf(myMessage, "1100 %d %d", Requester, Order);
 //	printf("recv_request: %s\n", myMessage);
+	sendNLMssge(myMessage);
+}
+
+void fill_COMEX_freelist(int remoteID, unsigned long offset, int order){
+	char myMessage[200];
+	
+	sprintf(myMessage, "1200 %d %lu %d", remoteID, offset, order);
+	printf("%s\n", myMessage);
 	sendNLMssge(myMessage);
 }
 

@@ -55,16 +55,26 @@ int init_NetLink(){
     sendmsg(sock_fd, &msg, 0);
 }
 
-void sendRDMA(int NodeID, int imm){
+void sendRDMA_CB_number(int NodeID, int imm){
 	strcpy((cb_pointers[NodeID]->send_buffer).piggy, RDMAmsg);
 	do_sendout(cb_pointers[NodeID], imm);
 }
 
+void sendRDMA_nodeID(int NodeID, int imm){
+	struct rdma_cb *cb_pointer;
+	
+	cb_pointer = id2cb(NodeID);
+
+	strcpy((cb_pointer->send_buffer).piggy, RDMAmsg);
+	do_sendout(cb_pointer, imm);
+}
+
 int main(int argc, char *argv[])
 {
+	unsigned long totalMem;
 	int totalCB, nodeID, i;
 	int cmdNo, target, order;
-	unsigned long totalMem;
+	unsigned long offset;
 	
 	totalMem = strtol(argv[1], NULL, 10);
 	totalCB = atoi(argv[2]);
@@ -72,7 +82,7 @@ int main(int argc, char *argv[])
 	
 	cb_pointers = startRDMA_Client(totalCB, nodeID, totalMem);	
 	for(i=0; i<totalCB; i++){
-		sprintf(RDMAmsg,"Hello msg from node %d\n", nodeID); sendRDMA(i, 2000);
+		sprintf(RDMAmsg,"Hello msg from node %d", nodeID); sendRDMA_CB_number(i, 2000);
 	}
 	
 	init_NetLink();
@@ -88,10 +98,17 @@ int main(int argc, char *argv[])
 				order = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 2);
 				
 //				printf("   Request Target %d size %d\n", target, order);
-				sprintf(RDMAmsg,"1100 %d %d\n", nodeID, order); sendRDMA(target, 1000);
+				sprintf(RDMAmsg,"1100 %d %d", nodeID, order); sendRDMA_CB_number(target, 1000);
+			break;
+			case 1101:
+				target = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 1);
+				offset = get_Param_from_Packet(NLMSG_DATA(nlh), 2);
+				order = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 3);
+				
+				sprintf(RDMAmsg,"1200 %d %lu %d", nodeID, offset, order); sendRDMA_nodeID(target, 1000);
 			break;
 			default:
-				printf(">>> default: %s\n", NLMSG_DATA(nlh));
+				printf(">>> default: %s", NLMSG_DATA(nlh));
 			break;
 		}
     }

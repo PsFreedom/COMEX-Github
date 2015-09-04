@@ -21,17 +21,27 @@ unsigned long get_Param_from_Packet(char *message, int pos){
 #ifdef IS_SERVER
 void recv_request(int Requester, int Order);
 void COMEX_server_cmd(char *message){
+
 	int cmdNo, from, order;
+	unsigned long offset;
 	
-	printf("%s: %s\n", __FUNCTION__, message);
+	printf("   %s: %s\n", __FUNCTION__, message);
 	cmdNo = (int)get_Param_from_Packet(message, 0);
 	switch(cmdNo){
 		case 1100:
 			from = (int)get_Param_from_Packet(message, 1);
 			order = (int)get_Param_from_Packet(message, 2);			
 			
-//			printf("   Case 1100: Node %d ask for 2 pow %d pages\n", from, order);
 			recv_request(from ,order);
+		break;
+		case 1200:
+			from = (int)get_Param_from_Packet(message, 1);
+			offset = get_Param_from_Packet(message, 2);
+			order = (int)get_Param_from_Packet(message, 3);			
+			
+			from = id2cbNum(from);
+			from = 0;		// Fixxxxx
+			fill_COMEX_freelist(from, offset, order);
 		break;
 		default:
 			printf("   default: %d - %s\n", cmdNo, message);

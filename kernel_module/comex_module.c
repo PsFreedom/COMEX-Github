@@ -43,7 +43,7 @@ static void nl_recv_msg(struct sk_buff *skb)
 {
 	unsigned long cmdNumber;
 	unsigned long NodeID, N_Nodes, COMEX_Address, COMEX_Address_End, Buffer_Address, MaxBuffer;	// for case 0: 
-	unsigned long RemoteID, RemoteAddr, nPages;		// for case 100:
+	unsigned long RemoteID, Offset, nPages;		// for case 100:
 	unsigned long requester, Order;	// for case 1100:
 	
 	struct nlmsghdr *nlh = (struct nlmsghdr *)skb->data;
@@ -67,22 +67,22 @@ static void nl_recv_msg(struct sk_buff *skb)
 							COMEX_Address, COMEX_Address_End, Buffer_Address, (int)MaxBuffer);
 			break;
 			
-		case 100:
-			RemoteID = getParamFromPacketData(skb, 1);
-			RemoteAddr = getParamFromPacketData(skb, 2);
-			nPages = getParamFromPacketData(skb, 3);
-			
-			printk(KERN_INFO "%s: RemoteID %lu ", __FUNCTION__, RemoteID);
-			printk(KERN_INFO "%s: RemoteAddr %lu nPages %lu", __FUNCTION__, RemoteAddr, nPages);
-//			COMEX_recv_fill((int)RemoteID, RemoteAddr, (int)nPages);
-			break;
-			
 		case 1100:
 			requester = getParamFromPacketData(skb, 1);
 			Order = getParamFromPacketData(skb, 2);
 			
 //			printk(KERN_INFO "%s: requester %lu Order %lu\n", __FUNCTION__, requester, Order);
 			COMEX_recv_asked((int)requester, (int)Order);
+			break;
+			
+		case 1200:
+			RemoteID = getParamFromPacketData(skb, 1);
+			Offset = getParamFromPacketData(skb, 2);
+			nPages = getParamFromPacketData(skb, 3);
+			
+			printk(KERN_INFO "%s: RemoteID %lu \n", __FUNCTION__, RemoteID);
+			printk(KERN_INFO "%s: Offset %lu nPages %lu\n", __FUNCTION__, Offset, nPages);
+			COMEX_recv_fill((int)RemoteID, Offset, (int)nPages);
 			break;
 			
 		default:

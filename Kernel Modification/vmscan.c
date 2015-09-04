@@ -725,9 +725,9 @@ int get_Frist_PID(struct page *page);
 unsigned long COMEX_get_from_Buddy(int order);
 
 typedef struct COMEX_remote_page_desc{
-	struct page *pageDesc;
 	int R_NodeID;
-	unsigned long R_PhyAddr;
+	unsigned long R_Offset;
+	
 	struct list_head listPointer;
 } COMEX_R_page;
 
@@ -758,7 +758,7 @@ void print_COMEX_Freelist(int listNO){
 	COMEX_R_page *targetPage;
 	
 	list_for_each_entry(targetPage, &COMEX_Freelist[listNO].listHeader, listPointer){
-		printk(KERN_INFO "%s: -> R_NodeID %d R_PhyAddr %lu\n", __FUNCTION__, targetPage->R_NodeID, targetPage->R_PhyAddr);
+		printk(KERN_INFO "%s: -> R_NodeID %d R_Offset %lu\n", __FUNCTION__, targetPage->R_NodeID, targetPage->R_Offset);
 	}
 }
 
@@ -787,7 +787,7 @@ int COMEX_move_to_Remote(struct page *page){
 	for(i=0; i<JumpThreshold; i++){
 		if(COMEX_Freelist[listNO].PageCounter > 0){
 			
-			if(bufferDesc[bufferTail].isFree == 0){
+/*			if(bufferDesc[bufferTail].isFree == 0){
 				COMEX_address = COMEX_buffer_addr + bufferTail*X86PageSize;
 				copy_user_highpage(bufferDesc[bufferTail].pageDesc, page, COMEX_address, COMEX_vma);
 				R_page = list_first_entry(&COMEX_Freelist[listNO].listHeader, COMEX_R_page, listPointer);			
@@ -820,10 +820,11 @@ int COMEX_move_to_Remote(struct page *page){
 			}
 			printk(KERN_INFO "%s: bufferHead %d bufferTail %d", __FUNCTION__, bufferHead, bufferTail);
 			
+			
 			prevPage = page;
 			prevNodeID = listNO;
-//			return listNO;
-			return -1;
+			return listNO;
+*/			return -1;
 		}
 		else if(COMEX_Freelist[listNO].requestLock == 0){
 			COMEX_Freelist[listNO].requestLock = 1;
@@ -836,7 +837,7 @@ int COMEX_move_to_Remote(struct page *page){
 	return -1;
 }
 
-void COMEX_recv_fill(int RemoteID, unsigned long RemoteAddr, int order){
+void COMEX_recv_fill(int RemoteID, unsigned long Offset, int order){
 	int i, nPages;
 	COMEX_R_page *rPage;
 	
@@ -845,30 +846,31 @@ void COMEX_recv_fill(int RemoteID, unsigned long RemoteAddr, int order){
 		for(i=0; i<nPages; i++){
 			rPage = (COMEX_R_page *)vmalloc(sizeof(COMEX_R_page));
 		
-			rPage->pageDesc = NULL;
 			rPage->R_NodeID = RemoteID;
-			rPage->R_PhyAddr = RemoteAddr + i*X86PageSize;
+			rPage->R_Offset = i*X86PageSize;
 			INIT_LIST_HEAD(&rPage->listPointer);
 		
 			COMEX_fill_R_list(rPage, RemoteID);
 		}
 	}
-//	print_COMEX_all_Freelist();
-//	print_COMEX_Freelist(RemoteID);
+	printk(KERN_INFO "%s: RemoteID %d Offset %lu Order %d", __FUNCTION__, RemoteID, Offset, order);
+	print_COMEX_all_Freelist();
+//	print_COMEX_Freelist(RemoteID);		// Fixxx
 }
 EXPORT_SYMBOL(COMEX_recv_fill);
 
 void COMEX_recv_asked(int requester, int order){
-	unsigned long availAddress = 0;
+	unsigned long Offset = -1;
 	
 	if(COMEX_Ready == 1){
-		availAddress = COMEX_get_from_Buddy(order);
-		while(availAddress == 0 && order > 5){
+//		Offset = COMEX_get_from_Buddy(order);	// Fixxx
+		Offset = COMEX_get_from_Buddy(order);
+		while(Offset == -1 && order > 5){
 			order--;
-			availAddress = COMEX_get_from_Buddy(order);
+			Offset = COMEX_get_from_Buddy(order);
 		}
-//		printk(KERN_INFO "%s: requester %d Address %lu Order %d", __FUNCTION__, requester,availAddress, order);
-		sprintf(NetlinkMSG, "1101 %d %lu %d ", requester, availAddress, order);
+//		printk(KERN_INFO "%s: requester %d Address %lu Order %d", __FUNCTION__, requester,Offset, order);
+		sprintf(NetlinkMSG, "1101 %d %lu %d ", requester, Offset, order);
 		NL_send_message();
 	}
 }
@@ -1174,7 +1176,7 @@ unsigned long COMEX_rmqueue_smallest(unsigned int order){
 		return page->pageNO + 1;
 	}
 
-	return 0;
+	return -1;
 }
 
 unsigned long COMEX_get_from_Buddy(int order){
@@ -1187,9 +1189,9 @@ unsigned long COMEX_get_from_Buddy(int order){
 	
 //	printk(KERN_INFO "%s: Allocate %lu\n", __FUNCTION__, pageNO);	
 	if(pageNO > 0)
-		return COMEX_start_addr + (pageNO-1)*X86PageSize;
+		return (pageNO-1)*X86PageSize;
 	
-	return 0;
+	return -1;
 }
 
 void COMEX_free_to_Buddy(unsigned long pageNO, unsigned int order){
@@ -1510,8 +1512,8 @@ int COMEX_move_to_COMEX(struct page *old_page){
 	spinlock_t *COMEX_ptl;
 	spinlock_t *old_ptl;
 	
-	COMEX_address = COMEX_get_from_Buddy(0);
-	if(COMEX_address == 0){
+	COMEX_address = COMEX_get_from_Buddy(0) + COMEX_start_addr;
+	if(COMEX_address == -1){
 		printk(KERN_INFO "%s: COMEX_address == 0\n", __FUNCTION__);
 		return 0;
 	}
