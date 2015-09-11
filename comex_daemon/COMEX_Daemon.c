@@ -8,13 +8,11 @@
 #include <unistd.h>
 
 #define IS_SERVER 1
-#include "RDMA_COMEX_both.h"
+#include "RDMA_COMEX_both_BETA2.h"
 
 #define LISTEN_PORT		7795
 #define NETLINK_COMEX	28
 #define MAX_PAYLOAD 	200 /* maximum payload size*/
-
-#define MAX_BUFFER 1024
 
 int sock_fd;
 struct sockaddr_nl src_addr, dest_addr;
@@ -138,7 +136,7 @@ int main(int argc, char *argv[])
 	printf("%s\n", myMessage);
 	sendNLMssge(myMessage);
 
-	cb_pointers = startRDMA_Server(totalCB, nodeID, totalMem,COMEX_Area);
+	cb_pointers = startRDMA_Server(totalCB, nodeID, totalMem, COMEX_Area);
 	close(sock_fd);
 	return 0;
 }

@@ -18,6 +18,7 @@ int main(int argc, char *argv[]){
 			Mem_Area[i]++;
 		}
 		sleep(20);
+		printf("Mem_Area[i] %d\n", Mem_Area[4096]);
 	}	
 	return 0;
 }

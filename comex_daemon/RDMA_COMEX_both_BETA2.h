@@ -197,6 +197,10 @@ do_poll(struct ibv_cq *cq,int* retval,int *retqpno) {
             retcb->remote_buffer.addr = ntohll(retcb->recv_buffer.addr);
             retcb->remote_buffer.length  = ntohl(retcb->recv_buffer.length);
             retcb->remote_buffer.rkey = ntohl(retcb->recv_buffer.rkey);
+            retcb->instanceNo=atoi(retcb->recv_buffer.piggy);
+            fprintf(stdout, "Received RDMA Buffer information: addr: 0x%llx, length: %" PRIu32 ", rkey: 0x%x\n",
+                (unsigned long long)retcb->remote_buffer.addr, retcb->remote_buffer.length, retcb->remote_buffer.rkey);
+            printf("InstanceNo=%d\n",retcb->instanceNo);
         }else{
             *retval=wc.imm_data;
             #ifdef VERBOSE
@@ -216,12 +220,12 @@ do_poll(struct ibv_cq *cq,int* retval,int *retqpno) {
         /*
          * check for immediate data.
          */
-        //    if ((wc.wc_flags & IBV_WC_WITH_IMM) == IBV_WC_WITH_IMM) {
+            if ((wc.wc_flags & IBV_WC_WITH_IMM) == IBV_WC_WITH_IMM) {
             #ifdef VERBOSE
-            fprintf(stdout, "Received immediate data: 0x%x\n", wc.imm_data);
+                fprintf(stdout, "Received immediate data: 0x%x\n", wc.imm_data);
             #endif
 			*retval=wc.imm_data;
-		//	}
+			}
             /*
              * Repost our RECV Buffer.
              */
@@ -388,6 +392,7 @@ ib_setup_common(struct rdma_cb *cb,struct ibv_comp_channel *cc,struct ibv_cq *cq
 			perror("shmat");
 			exit(1);
 		}
+		COMEX_Area = cb->rdma_buffer;
 		#ifdef VERBOSE
 			printf("COMEX AREA is null, registered at%p\n",cb->rdma_buffer);
 		#endif
@@ -396,7 +401,7 @@ ib_setup_common(struct rdma_cb *cb,struct ibv_comp_channel *cc,struct ibv_cq *cq
 			printf("COMEX AREA is %p\n",COMEX_Area);
 		#endif
 		cb->rdma_buffer = COMEX_Area;
-	}	
+	}
 	printf("cb->rdma_mr= %p\n",cb->rdma_mr);
 	if (!cb->rdma_buffer) {
 		fprintf(stderr, "Error allocating rdma buffer\n");
@@ -405,7 +410,7 @@ ib_setup_common(struct rdma_cb *cb,struct ibv_comp_channel *cc,struct ibv_cq *cq
 	// original
 	 cb->rdma_mr = ibv_reg_mr(cb->pd, cb->rdma_buffer, cb->rdma_buf_len,
 					IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ| IBV_ACCESS_REMOTE_WRITE );
-	
+
 	//test
 	/*
 	cb->rdma_mr = ibv_reg_mr(cb->pd, cb->rdma_buffer, cb->rdma_buf_len,
@@ -542,7 +547,7 @@ do_recv(struct rdma_cb *cb) {
 	return 0;
 }
 
-int do_send(struct rdma_cb *cb, enum ibv_wr_opcode opcode,int ouroffset,int remoteoffset,uint32_t immdOrsize) {
+int do_send(struct rdma_cb *cb, enum ibv_wr_opcode opcode,unsigned long ouroffset,unsigned long remoteoffset,uint32_t immdOrsize) {
 
 	struct ibv_send_wr send_wr, *bad_wr;
 	struct ibv_sge send_sge;
@@ -640,25 +645,8 @@ ack:
 
 	return err;
 }
-int getRDMAinfo(struct rdma_cb *cb ){
-/*
- * Wait for the otherside to send the rdma buffer information
- */
-    int err;
-    int retqpno;
-	int retimm;
-	fprintf(stdout, "Waiting for other side rdma buffer info\n");
-	//
-	err = do_completion(cb,&retimm,&retqpno);
-	if (err) {
-		return 1;
-	}
 
-	fprintf(stdout, "Received RDMA Buffer information: addr: 0x%llx, length: %" PRIu32 ", rkey: 0x%x\n",
-			(unsigned long long)cb->remote_buffer.addr, cb->remote_buffer.length, cb->remote_buffer.rkey);
-    return 0;
-}
-int sendRDMAinfo(struct rdma_cb *cb ){
+int sendRDMAinfo(struct rdma_cb *cb,int instanceNo){
 /*
  * Pass RDMA buffer information to the other side
  */
@@ -668,9 +656,9 @@ int sendRDMAinfo(struct rdma_cb *cb ){
         cb->send_buffer.addr  = htonll((uint64_t)cb->rdma_buffer);
         cb->send_buffer.length = htonl(cb->rdma_buf_len);
         cb->send_buffer.rkey = htonl(cb->rdma_mr->rkey);
-
-        fprintf(stdout, "Sending RDMA Buffer information: addr: 0x%llx, length: %lld, rkey: 0x%x\n",
-                        (unsigned long long)cb->rdma_buffer, cb->rdma_buf_len, cb->rdma_mr->rkey);
+        sprintf(cb->send_buffer.piggy,"%d",instanceNo);
+        fprintf(stdout, "Sending RDMA Buffer information: addr: 0x%llx, length: %lld, rkey: 0x%x instanceNo=%d\n",
+                        (unsigned long long)cb->rdma_buffer, cb->rdma_buf_len, cb->rdma_mr->rkey,instanceNo);
         err = do_send(cb, IBV_WR_SEND,0,0,0);
         if (err) {
                 return 1;
@@ -817,7 +805,7 @@ int err;
         }
         return 0;
 }
-int do_write(struct rdma_cb *cb,int ouroffset,int remoteoffset,int size){
+int do_write(struct rdma_cb *cb,unsigned long ouroffset,unsigned long remoteoffset,unsigned int size){
 int err;
 int retqpno;
 int retimm;
@@ -847,7 +835,7 @@ int do_sendout(struct rdma_cb *cb,int imm){
 
     err = do_completion(cb,&retimm,&retqpno);
         if (err) {
-		
+
 			printf("error2!");
                 return 1;
     }
@@ -881,7 +869,7 @@ int
 do_server(struct rdma_cb *cb[0],int cbcount) {
 	struct rdma_conn_param conn_params[2];
 	int err,i;
-	int retqpno;
+	int retqpno,retimm;
     //internal init
     for(i=0;i<cbcount;i++){
         err=server_Internalinit(cb[i],&conn_params[i]);
@@ -901,23 +889,16 @@ do_server(struct rdma_cb *cb[0],int cbcount) {
         if(err){
             return err;
         };
-        err=getRDMAinfo(cb[i]);
+        //
+        err = do_completion(cb[i],&retimm,&retqpno);
+        if (err) {
+            return err;
+        }
+        err=sendRDMAinfo(cb[i],myinstanceNo);
         if(err){
             return server_disconnect(cb[i]);
         };
-        err=sendRDMAinfo(cb[i]);
-        if(err){
-            return server_disconnect(cb[i]);
-        };
-        err=get_write_imm(cb[i],&(cb[i]->instanceNo)); // get id
-        if(err){
-            return server_disconnect(cb[i]);
-        };
-        err=do_write_imm(cb[i],myinstanceNo); // send id
-        if(err){
-            return server_disconnect(cb[i]);
-        };
-        printf("InstanceNo=%d\n",cb[i]->instanceNo);
+// trade instanceNo integreated in RDMAinfo
         cc=cb[i]->comp_channel;
         cq=cb[i]->cq;
 	}
@@ -944,6 +925,8 @@ do_server(struct rdma_cb *cb[0],int cbcount) {
             case 5:
                 printf("piggy = %s\n",qp2cb(retqpno)->recv_buffer.piggy);
             break;
+            case 2:
+                printf("Instance number info? why do i get it now?");
             case -1:
                 printf("get disconnect msg\n"); // should be modify to handle more than one connection
                 work=0;
@@ -1083,7 +1066,7 @@ do_client(struct rdma_cb *cb[],int cbcount) {
 
  	struct ibv_comp_channel *cc=0;
 	struct ibv_cq *cq=0;
-	int retqpno;
+	int retqpno,f,retimm;;
     err=client_init(cb[0],cc,cq);
 	if (err) {
 		return err;
@@ -1100,35 +1083,18 @@ do_client(struct rdma_cb *cb[],int cbcount) {
 /*
  * Initialize the RDMA buffer memory
  */
-    int f;
  	for(i=0;i<cbcount;i++){
         //strncpy(cb[i]->rdma_buffer, RDMA_STRING, cb[i]->rdma_buf_len);
-        err=sendRDMAinfo(cb[i]);
+        err=sendRDMAinfo(cb[i],myinstanceNo);
         if(err){
 			printf("sendRDMAinfo\n");
             return 1;
         }
-        err=getRDMAinfo(cb[i]);
-        if(err){
-			printf("getRDMAinfo\n");
-            return 1;
+        err = do_completion(cb[i],&retimm,&retqpno);
+        if (err) {
+            return err;
         }
-		
-//		printf("x\n");
-        err=do_write_imm(cb[i],myinstanceNo); // send id
-        if(err){
-			printf("do_write_imm\n");
-            return 1;
-        };
-//		printf("y\n");
-        err=get_write_imm(cb[i],&f); // get id
-        if(err){
-			printf("get_write_imm\n");
-            return 1;
-        };
-//		printf("z\n");
-        cb[i]->instanceNo=f;
-        printf("InstanceNo=%d\n",cb[i]->instanceNo);
+
  	}
 //message queue init
 init_mq_receiver();
@@ -1139,7 +1105,7 @@ init_mq_receiver();
         //char tmpstr[40]="test bug one two three";
         //strcpy((cb[0]->send_buffer).piggy, tmpstr); //or memcpy or whatever
         //do_sendout(cb[0],24,5); //edit 24
-            
+
 
     }
 //	printf("here\n");
@@ -1151,14 +1117,14 @@ init_mq_receiver();
             return client_disconnect(cb[0]);
         }
 	}
-	
-	
+
+
 //////////////////////////////////////////////////////////////////////////////////////
     //
     for(i=cbcount-1;i>0;i--){
         client_disconnect(cb[i]);
     }
-	
+
     return client_disconnect(cb[0]);
 	*/
 	return 0;
@@ -1180,7 +1146,7 @@ int allinit(struct rdma_cb *cb[],int cbcount,int startport){
             cb[i]->sin.sin_port = startport+i;
         }
 		err = do_server(cb, cbcount);
-	} 
+	}
 	else {							// Client
 	    for(i=0; i<cbcount; i++){
             cb[i]->sin.sin_port = startport+ atoi(allPort[i]);
@@ -1195,7 +1161,7 @@ int allinit(struct rdma_cb *cb[],int cbcount,int startport){
 			fprintf(stderr, "Error - %d\n", err);
 		}
 	}
-	
+
 	return err;
 }
 // argv[1] first arg= number of instance
@@ -1238,14 +1204,13 @@ out:
 }
 */
 
-struct rdma_cb **  startRDMA_Server(int totalNodes, int nodeID, unsigned long totalMem, char* COMEXArea) {
+struct rdma_cb **  startRDMA_Server(int totalNodes, int nodeID, unsigned long totalMem, char* COMEXAREA) {
 	struct rdma_cb **cb_pointers;
 	int i;
 
 	myinstanceNo = nodeID;
 	BUF_LEN = totalMem;
-	COMEX_Area = COMEXArea;
-
+	COMEX_Area = COMEXAREA;
 	cb_pointers = (struct rdma_cb **)malloc(sizeof(struct rdma_cb *)*totalNodes);
 	for(i=0; i<totalNodes; i++){
 		cb_pointers[i] = (struct rdma_cb *)malloc(sizeof(struct rdma_cb));

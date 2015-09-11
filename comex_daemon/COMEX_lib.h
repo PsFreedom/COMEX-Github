@@ -1,3 +1,8 @@
+#define MAX_BUFFER 1024
+
+unsigned long BUF_LEN;
+char *COMEX_Area = NULL;
+
 unsigned long get_Param_from_Packet(char *message, int pos){
 	int start=0, end=0;
 	char msgBuff[256];
@@ -18,6 +23,46 @@ unsigned long get_Param_from_Packet(char *message, int pos){
 	return strtol(&msgBuff[start], &msgBuff[end], 10);
 }
 
+void checkSumPage(unsigned long startOffset){
+	int i;
+	unsigned long checkSum=0;
+	
+	for(i=startOffset; i<startOffset+4096; i++){
+		checkSum += COMEX_Area[i];
+	}
+	printf("		Page checkSum = %lu\n", checkSum);
+}
+
+void checkSumArea(){
+	int i;
+	unsigned long checkSum=0;
+	
+	for(i=0; i<BUF_LEN - (4096*MAX_BUFFER); i++){
+		checkSum += COMEX_Area[i];
+	}
+	printf("		Area checkSum = %lu\n", checkSum);
+}
+
+void checkSumBuffer(){
+	int i;
+	unsigned long checkSum=0;
+	
+	for(i = BUF_LEN-(4096*MAX_BUFFER); i<BUF_LEN; i++){
+		checkSum += COMEX_Area[i];
+	}
+	printf("		Buffer checkSum = %lu\n", checkSum);
+}
+
+void checkSumAll(){
+	int i;
+	unsigned long checkSum=0;
+	
+	for(i=0; i<BUF_LEN; i++){
+		checkSum += COMEX_Area[i];
+	}
+	printf("		All checkSum = %lu\n", checkSum);
+}
+
 #ifdef IS_SERVER
 void recv_request(int Requester, int Order);
 void COMEX_server_cmd(char *message){
@@ -28,24 +73,33 @@ void COMEX_server_cmd(char *message){
 	printf("   %s: %s\n", __FUNCTION__, message);
 	cmdNo = (int)get_Param_from_Packet(message, 0);
 	switch(cmdNo){
-		case 1100:
+		case 1100:	// Get request
 			from = (int)get_Param_from_Packet(message, 1);
 			order = (int)get_Param_from_Packet(message, 2);			
 			
 			recv_request(from ,order);
-		break;
-		case 1200:
+			break;
+		case 1200:	// Recieve pages
 			from = (int)get_Param_from_Packet(message, 1);
 			offset = get_Param_from_Packet(message, 2);
 			order = (int)get_Param_from_Packet(message, 3);			
 			
 			from = id2cbNum(from);
-			from = 0;		// Fixxxxx
 			fill_COMEX_freelist(from, offset, order);
-		break;
+			break;
+		case 9000:	// Debug checksum all area
+			printf("   Debug: This is debug message\n", cmdNo, message);
+			checkSumArea();
+			break;
+		case 9100:	// Debug checksum page
+			offset = (int)get_Param_from_Packet(message, 1);
+		
+			printf("   Debug: This is debug message\n", cmdNo, message);
+			checkSumPage(offset);
+			break;
 		default:
 			printf("   default: %d - %s\n", cmdNo, message);
-		break;
+			break;
 	}
 }
 void COMEX_server_msg(char *message){

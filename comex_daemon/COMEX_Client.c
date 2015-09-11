@@ -1,4 +1,4 @@
-#include "RDMA_COMEX_both.h"
+#include "RDMA_COMEX_both_BETA2.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,12 +73,13 @@ int main(int argc, char *argv[])
 {
 	unsigned long totalMem;
 	int totalCB, nodeID, i;
-	int cmdNo, target, order;
-	unsigned long offset;
+	int cmdNo, target, Order;
+	unsigned int Size;
+	unsigned long Offset, bufferOffset;
 	
 	totalMem = strtol(argv[1], NULL, 10);
 	totalCB = atoi(argv[2]);
-	nodeID = atoi(argv[3]);	
+	nodeID = atoi(argv[3]);
 	
 	cb_pointers = startRDMA_Client(totalCB, nodeID, totalMem);	
 	for(i=0; i<totalCB; i++){
@@ -93,23 +94,40 @@ int main(int argc, char *argv[])
 		printf("   %s: %s\n", __FUNCTION__, NLMSG_DATA(nlh));
 		cmdNo = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 0);
 		switch(cmdNo){
-			case 1100:
+			case 1100:	// Request for pages
 				target = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 1);
-				order = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 2);
+				Order = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 2);
 				
-//				printf("   Request Target %d size %d\n", target, order);
-				sprintf(RDMAmsg,"1100 %d %d", nodeID, order); sendRDMA_CB_number(target, 1000);
-			break;
-			case 1101:
+//				printf("   Request Target %d size %d\n", target, Order);
+				sprintf(RDMAmsg,"1100 %d %d", nodeID, Order); sendRDMA_CB_number(target, 1000);
+				break;
+			case 1101:	// Reply with pages
 				target = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 1);
-				offset = get_Param_from_Packet(NLMSG_DATA(nlh), 2);
-				order = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 3);
+				Offset = get_Param_from_Packet(NLMSG_DATA(nlh), 2);
+				Order = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 3);
 				
-				sprintf(RDMAmsg,"1200 %d %lu %d", nodeID, offset, order); sendRDMA_nodeID(target, 1000);
-			break;
+				sprintf(RDMAmsg,"1200 %d %lu %d", nodeID, Offset, Order); sendRDMA_nodeID(target, 1000);
+				break;
+			case 2100:	// Write page to remote node
+				bufferOffset = get_Param_from_Packet(NLMSG_DATA(nlh), 1);
+				target = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 2);
+				Offset = get_Param_from_Packet(NLMSG_DATA(nlh), 3);
+				Size = (unsigned int)get_Param_from_Packet(NLMSG_DATA(nlh), 4);
+				
+				printf("2100 from %d offset %lu\n", nodeID, bufferOffset);
+				printf("     to %d[CB] offset %lu\n", target, Offset);
+				printf("     size %d\n", Size);
+				
+				checkSumPage(bufferOffset);
+				do_write(cb_pointers[target], bufferOffset, Offset, Size*4096);
+				sleep(10);
+				sprintf(RDMAmsg,"9100 %lu", Offset); sendRDMA_CB_number(target, 1000);
+				sprintf(RDMAmsg,"9100 %lu", Offset+4096); sendRDMA_CB_number(target, 1000);
+				sprintf(RDMAmsg,"9100 %lu", Offset+4096+4096); sendRDMA_CB_number(target, 1000);
+				break;
 			default:
 				printf(">>> default: %s", NLMSG_DATA(nlh));
-			break;
+				break;
 		}
     }
     close(sock_fd);		

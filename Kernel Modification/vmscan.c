@@ -733,7 +733,7 @@ typedef struct COMEX_remote_page_desc{
 
 typedef struct COMEX_remote_list_header{
 	struct list_head listHeader;
-	int PageCounter;	
+	unsigned long PageCounter;	
 	int requestLock;
 } COMEX_R_Header;
 COMEX_R_Header *COMEX_Freelist;//[MAX_Remote_Nodes];
@@ -741,7 +741,7 @@ COMEX_R_Header *COMEX_Usedlist;//[MAX_Remote_Nodes];
 
 typedef struct COMEX_buffer_descriptor{
 	struct page *pageDesc;
-	unsigned long virtualAddr;
+	unsigned long Offset;
 	int isFree;
 } COMEXbuffer;
 COMEXbuffer *bufferDesc;
@@ -749,7 +749,7 @@ COMEXbuffer *bufferDesc;
 void print_COMEX_all_Freelist(void){
 	int i;	
 	for(i=0; i<COMEX_Total_Nodes; i++){
-		printk(KERN_INFO "%s: COMEX_Freelist[%d]: %d\n", __FUNCTION__, i, COMEX_Freelist[i].PageCounter);
+		printk(KERN_INFO "%s: COMEX_Freelist[%d]: %lu\n", __FUNCTION__, i, COMEX_Freelist[i].PageCounter);
 	}
 }
 
@@ -778,16 +778,17 @@ int COMEX_Hash(int nodeID, int PID){
 
 int COMEX_move_to_Remote(struct page *page){
 
-	int i, listNO, firstPID, Order=10;
-	unsigned long COMEX_address;
+	int i, listNO, firstPID, Order=0;
+	unsigned long COMEX_address, Offset, Size=1;
 	COMEX_R_page *R_page;
 	
 	firstPID = get_Frist_PID(page);
 	listNO = COMEX_Hash(COMEX_Node_ID, firstPID);
+	
 	for(i=0; i<JumpThreshold; i++){
 		if(COMEX_Freelist[listNO].PageCounter > 0){
-			
-/*			if(bufferDesc[bufferTail].isFree == 0){
+/*			
+			if(bufferDesc[bufferTail].isFree == 0){
 				COMEX_address = COMEX_buffer_addr + bufferTail*X86PageSize;
 				copy_user_highpage(bufferDesc[bufferTail].pageDesc, page, COMEX_address, COMEX_vma);
 				R_page = list_first_entry(&COMEX_Freelist[listNO].listHeader, COMEX_R_page, listPointer);			
@@ -824,10 +825,27 @@ int COMEX_move_to_Remote(struct page *page){
 			prevPage = page;
 			prevNodeID = listNO;
 			return listNO;
-*/			return -1;
+*/			
+			if(bufferDesc[bufferTail].isFree == 0){
+				Offset = bufferTail*X86PageSize;
+				COMEX_address = COMEX_buffer_addr + Offset;
+				
+				copy_user_highpage(bufferDesc[bufferTail].pageDesc, page, COMEX_address, COMEX_vma);
+				R_page = list_first_entry(&COMEX_Freelist[listNO].listHeader, COMEX_R_page, listPointer);
+				COMEX_drain_R_list(R_page, listNO);
+				
+//				printk(KERN_INFO "%s: Addr %lu bufferTail %d PageCounter %lu\n", __FUNCTION__, COMEX_address, bufferTail, COMEX_Freelist[listNO].PageCounter);
+				sprintf(NetlinkMSG, "2100 %lu %lu %d %d", bufferDesc[bufferTail].Offset, listNO, Offset, Size);
+				NL_send_message();
+				
+//				print_COMEX_Freelist(listNO);
+				bufferDesc[bufferTail].isFree = 1;
+				bufferTail++;
+			}
+			return -1;
 		}
-		else if(COMEX_Freelist[listNO].requestLock == 0){
-			COMEX_Freelist[listNO].requestLock = 1;
+		else if(COMEX_Freelist[listNO].requestLock > 0){
+			COMEX_Freelist[listNO].requestLock--;
 			sprintf(NetlinkMSG, "1100 %d %d ", listNO, Order);
 			NL_send_message();
 		}
@@ -853,7 +871,9 @@ void COMEX_recv_fill(int RemoteID, unsigned long Offset, int order){
 			COMEX_fill_R_list(rPage, RemoteID);
 		}
 	}
-	printk(KERN_INFO "%s: RemoteID %d Offset %lu Order %d", __FUNCTION__, RemoteID, Offset, order);
+//	COMEX_Freelist[RemoteID].requestLock++;		// Fixxx
+	
+	printk(KERN_INFO "%s: RemoteID %d Offset %lu Order %d || requestLock %d\n", __FUNCTION__, RemoteID, Offset, order, COMEX_Freelist[RemoteID].requestLock);
 	print_COMEX_all_Freelist();
 //	print_COMEX_Freelist(RemoteID);		// Fixxx
 }
@@ -863,7 +883,6 @@ void COMEX_recv_asked(int requester, int order){
 	unsigned long Offset = -1;
 	
 	if(COMEX_Ready == 1){
-//		Offset = COMEX_get_from_Buddy(order);	// Fixxx
 		Offset = COMEX_get_from_Buddy(order);
 		while(Offset == -1 && order > 5){
 			order--;
@@ -1229,7 +1248,7 @@ void print_free_blocks(void){
 void init_Remote(void){
 	
 	int i;
-	unsigned long tmpStartAddr;
+	unsigned long tmpStartAddr, offset=0;
 	pgd_t *COMEX_pgd;
 	pud_t *COMEX_pud;
 	pmd_t *COMEX_pmd;
@@ -1239,12 +1258,12 @@ void init_Remote(void){
 	struct page *COMEXpageDesc;	
 	
 	bufferDesc = (COMEXbuffer *)vmalloc(sizeof(COMEXbuffer)*COMEX_MAX_Buffer);
-	tmpStartAddr = COMEX_buffer_addr;
 	for(i=0; i<COMEX_MAX_Buffer; i++){
 	
 		bufferDesc[i].isFree = 0;
-		bufferDesc[i].virtualAddr = tmpStartAddr;
+		bufferDesc[i].Offset = COMEX_buffer_addr - COMEX_start_addr + offset;
 		
+		tmpStartAddr = COMEX_buffer_addr + offset;
 		COMEX_pgd = pgd_offset(COMEX_mm, tmpStartAddr);
 		if (pgd_none(*COMEX_pgd) || pgd_bad(*COMEX_pgd)){
 			printk(KERN_INFO "%s: PGD bug\n", __FUNCTION__);
@@ -1262,11 +1281,12 @@ void init_Remote(void){
 		COMEXpageDesc = pte_page(COMEX_pte);
 		bufferDesc[i].pageDesc = COMEXpageDesc;
 		pte_unmap_unlock(COMEX_ptep, COMEX_ptl);
-		
+	
 //		printk(KERN_INFO "%s: bufferDesc->pageDesc %lu\n",__FUNCTION__, bufferDesc[i].pageDesc);
-		tmpStartAddr = tmpStartAddr + X86PageSize;
+		offset = offset + X86PageSize;
 	}
 	
+	printk(KERN_INFO "%s: COMEX_Total_Nodes -> %d\n",__FUNCTION__, COMEX_Total_Nodes);
 	COMEX_Freelist = (COMEX_R_Header *)vmalloc(sizeof(COMEX_R_Header)*COMEX_Total_Nodes);
 	COMEX_Usedlist = (COMEX_R_Header *)vmalloc(sizeof(COMEX_R_Header)*COMEX_Total_Nodes);
 	for(i=0; i<COMEX_Total_Nodes; i++){
@@ -1276,7 +1296,7 @@ void init_Remote(void){
 		COMEX_Freelist[i].PageCounter = 0;
 		COMEX_Usedlist[i].PageCounter = 0;
 		
-		COMEX_Freelist[i].requestLock = 0;
+		COMEX_Freelist[i].requestLock = 1;	// Fixxx
 		COMEX_Usedlist[i].requestLock = 0;
 	}
 }
@@ -1766,6 +1786,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 //				if(COMEX_move_to_COMEX(page) == 1){
 //					goto COMEX_Out;
 //				}
+//				printk(KERN_INFO "%s: COMEX_Ready\n", __FUNCTION__);
 				if(COMEX_move_to_Remote(page) == 1){
 					goto COMEX_Out;
 				}
