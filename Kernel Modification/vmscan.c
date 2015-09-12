@@ -778,7 +778,7 @@ int COMEX_Hash(int nodeID, int PID){
 
 int COMEX_move_to_Remote(struct page *page){
 
-	int i, listNO, firstPID, Order=0;
+	int i, listNO, firstPID, Order=10;
 	unsigned long COMEX_address, Offset, Size=1;
 	COMEX_R_page *R_page;
 	
@@ -838,7 +838,6 @@ int COMEX_move_to_Remote(struct page *page){
 				sprintf(NetlinkMSG, "2100 %lu %lu %d %d", bufferDesc[bufferTail].Offset, listNO, Offset, Size);
 				NL_send_message();
 				
-//				print_COMEX_Freelist(listNO);
 				bufferDesc[bufferTail].isFree = 1;
 				bufferTail++;
 			}

@@ -114,16 +114,13 @@ int main(int argc, char *argv[])
 				Offset = get_Param_from_Packet(NLMSG_DATA(nlh), 3);
 				Size = (unsigned int)get_Param_from_Packet(NLMSG_DATA(nlh), 4);
 				
-				printf("2100 from %d offset %lu\n", nodeID, bufferOffset);
-				printf("     to %d[CB] offset %lu\n", target, Offset);
-				printf("     size %d\n", Size);
-				
-				checkSumPage(bufferOffset);
+				//printf("2100 from %d offset %lu\n", nodeID, bufferOffset);
+				//printf("     to %d[CB] offset %lu\n", target, Offset);
+				//printf("     size %d\n", Size);				
+				//checkSumPage(bufferOffset);
 				do_write(cb_pointers[target], bufferOffset, Offset, Size*4096);
-				sleep(10);
-				sprintf(RDMAmsg,"9100 %lu", Offset); sendRDMA_CB_number(target, 1000);
-				sprintf(RDMAmsg,"9100 %lu", Offset+4096); sendRDMA_CB_number(target, 1000);
-				sprintf(RDMAmsg,"9100 %lu", Offset+4096+4096); sendRDMA_CB_number(target, 1000);
+				//sleep(10);
+				//sprintf(RDMAmsg,"9100 %lu", Offset); sendRDMA_CB_number(target, 1000);
 				break;
 			default:
 				printf(">>> default: %s", NLMSG_DATA(nlh));

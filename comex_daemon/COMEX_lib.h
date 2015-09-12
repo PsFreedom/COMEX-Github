@@ -24,8 +24,7 @@ unsigned long get_Param_from_Packet(char *message, int pos){
 }
 
 void checkSumPage(unsigned long startOffset){
-	int i;
-	unsigned long checkSum=0;
+	unsigned long i, checkSum=0;
 	
 	for(i=startOffset; i<startOffset+4096; i++){
 		checkSum += COMEX_Area[i];
@@ -34,8 +33,7 @@ void checkSumPage(unsigned long startOffset){
 }
 
 void checkSumArea(){
-	int i;
-	unsigned long checkSum=0;
+	unsigned long i, checkSum=0;
 	
 	for(i=0; i<BUF_LEN - (4096*MAX_BUFFER); i++){
 		checkSum += COMEX_Area[i];
@@ -44,8 +42,7 @@ void checkSumArea(){
 }
 
 void checkSumBuffer(){
-	int i;
-	unsigned long checkSum=0;
+	unsigned long i, checkSum=0;
 	
 	for(i = BUF_LEN-(4096*MAX_BUFFER); i<BUF_LEN; i++){
 		checkSum += COMEX_Area[i];
@@ -54,8 +51,7 @@ void checkSumBuffer(){
 }
 
 void checkSumAll(){
-	int i;
-	unsigned long checkSum=0;
+	unsigned long i, checkSum=0;
 	
 	for(i=0; i<BUF_LEN; i++){
 		checkSum += COMEX_Area[i];
