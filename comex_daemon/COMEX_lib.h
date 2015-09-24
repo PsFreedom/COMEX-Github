@@ -20,7 +20,7 @@ unsigned long get_Param_from_Packet(char *message, int pos){
 	}
 	end--;
 	
-	return strtol(&msgBuff[start], &msgBuff[end], 10);
+	return strtoul(&msgBuff[start], &msgBuff[end], 10);
 }
 
 void checkSumPage(unsigned long startOffset){
@@ -66,7 +66,7 @@ void COMEX_server_cmd(char *message){
 	int cmdNo, from, order;
 	unsigned long offset;
 	
-	printf("   %s: %s\n", __FUNCTION__, message);
+//	printf("   %s: %s\n", __FUNCTION__, message);
 	cmdNo = (int)get_Param_from_Packet(message, 0);
 	switch(cmdNo){
 		case 1100:	// Get request

@@ -88,7 +88,7 @@ void fill_COMEX_freelist(int remoteID, unsigned long offset, int order){
 	char myMessage[200];
 	
 	sprintf(myMessage, "1200 %d %lu %d", remoteID, offset, order);
-	printf("%s\n", myMessage);
+//	printf("%s\n", myMessage);
 	sendNLMssge(myMessage);
 }
 

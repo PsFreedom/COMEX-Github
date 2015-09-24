@@ -73,7 +73,7 @@ int main(int argc, char *argv[])
 {
 	unsigned long totalMem;
 	int totalCB, nodeID, i;
-	int cmdNo, target, Order;
+	int cmdNo, target, Order, oriOrder;
 	unsigned int Size;
 	unsigned long Offset, bufferOffset;
 	
@@ -91,7 +91,7 @@ int main(int argc, char *argv[])
 	printf("   Received message payload: %s\n", NLMSG_DATA(nlh));
     while(1){
 		recvmsg(sock_fd, &msg, 0);
-		printf("   %s: %s\n", __FUNCTION__, NLMSG_DATA(nlh));
+//		printf("   %s: %s\n", __FUNCTION__, NLMSG_DATA(nlh));
 		cmdNo = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 0);
 		switch(cmdNo){
 			case 1100:	// Request for pages
@@ -105,8 +105,14 @@ int main(int argc, char *argv[])
 				target = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 1);
 				Offset = get_Param_from_Packet(NLMSG_DATA(nlh), 2);
 				Order = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 3);
+				oriOrder = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 4);
 				
-				sprintf(RDMAmsg,"1200 %d %lu %d", nodeID, Offset, Order); sendRDMA_nodeID(target, 1000);
+				if(Offset == 18446744073709551615){		// MAX unsigned long (-1)
+					printf("	not enough pages");
+				}
+				else{
+					sprintf(RDMAmsg,"1200 %d %lu %d", nodeID, Offset, Order); sendRDMA_nodeID(target, 1000);
+				}
 				break;
 			case 2100:	// Write page to remote node
 				bufferOffset = get_Param_from_Packet(NLMSG_DATA(nlh), 1);
@@ -114,13 +120,8 @@ int main(int argc, char *argv[])
 				Offset = get_Param_from_Packet(NLMSG_DATA(nlh), 3);
 				Size = (unsigned int)get_Param_from_Packet(NLMSG_DATA(nlh), 4);
 				
-				//printf("2100 from %d offset %lu\n", nodeID, bufferOffset);
-				//printf("     to %d[CB] offset %lu\n", target, Offset);
-				//printf("     size %d\n", Size);				
-				//checkSumPage(bufferOffset);
-				do_write(cb_pointers[target], bufferOffset, Offset, Size*4096);
-				//sleep(10);
-				//sprintf(RDMAmsg,"9100 %lu", Offset); sendRDMA_CB_number(target, 1000);
+//				do_write(cb_pointers[target], bufferOffset, Offset, Size*4096);
+//				sprintf(RDMAmsg,"9100 %lu", Offset); sendRDMA_CB_number(target, 1000);
 				break;
 			default:
 				printf(">>> default: %s", NLMSG_DATA(nlh));

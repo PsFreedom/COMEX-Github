@@ -1,0 +1,62 @@
+
+/*			if(bufferDesc[bufferTail].isFree == 0){
+				COMEX_address = COMEX_buffer_addr + bufferTail*X86PageSize;
+				copy_user_highpage(bufferDesc[bufferTail].pageDesc, page, COMEX_address, COMEX_vma);
+				R_page = list_first_entry(&COMEX_Freelist[listNO].listHeader, COMEX_R_page, listPointer);			
+//				COMEX_drain_R_list(R_page, listNO);
+				
+//				bufferDesc[bufferTail].isFree = 1;
+				bufferTail++;
+			}
+			else{
+				return -1;
+			}
+			
+			if(bufferTail > 1){
+				if(prevPage+1 != page || prevNodeID != listNO){
+					// ship
+					// Head
+					// Tail - 2
+					printk(KERN_INFO "%s: ---> Ship Frac Head %d Tail %d", __FUNCTION__, bufferHead, bufferTail-1);				
+					bufferHead = bufferTail-1;
+					bufferTail = bufferTail;					
+				}
+				if(bufferTail == COMEX_MAX_Buffer){
+					// ship
+					// Head
+					// Tail - 1
+					printk(KERN_INFO "%s: ---> Ship END  Head %d Tail %d", __FUNCTION__, bufferHead, bufferTail-1);				
+					bufferHead = 0;
+					bufferTail = 0;
+				}				
+			}
+			printk(KERN_INFO "%s: bufferHead %d bufferTail %d", __FUNCTION__, bufferHead, bufferTail);			
+			return listNO;
+*/			
+/*			if(bufferDesc[bufferTail].isFree == 0){
+				Offset = bufferTail*X86PageSize;
+				COMEX_address = COMEX_buffer_addr + Offset;
+				
+				copy_user_highpage(bufferDesc[bufferTail].pageDesc, page, COMEX_address, COMEX_vma);
+				R_page = list_first_entry(&COMEX_Freelist[listNO].listHeader, COMEX_R_page, listPointer);
+				COMEX_drain_R_list(R_page, listNO);
+				
+//				bufferDesc[bufferTail].isFree = 1;
+				bufferTail++;
+			}
+			if(bufferTail > 1){
+				if(prevNodeID != listNO){				
+					sprintf(NetlinkMSG, "2100 %lu %lu %d %d", bufferDesc[bufferHead].Offset, listNO, R_page->R_Offset, bufferTail-bufferHead-1);
+					NL_send_message(NetlinkMSG);
+					
+					bufferHead = bufferTail-1;
+				}
+				if(bufferTail == COMEX_MAX_Buffer){
+					sprintf(NetlinkMSG, "2100 %lu %lu %d %d", bufferDesc[bufferHead].Offset, listNO, R_page->R_Offset, bufferTail-bufferHead);
+					NL_send_message(NetlinkMSG);
+
+					bufferHead = 0;
+					bufferTail = 0;
+				}
+			}
+*/

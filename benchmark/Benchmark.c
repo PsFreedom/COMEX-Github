@@ -17,7 +17,7 @@ int main(int argc, char *argv[]){
 		for(i=0; i<totalChar; i+=4096){		
 			Mem_Area[i]++;
 		}
-		sleep(20);
+		sleep(60);
 		printf("Mem_Area[i] %d\n", Mem_Area[4096]);
 	}	
 	return 0;

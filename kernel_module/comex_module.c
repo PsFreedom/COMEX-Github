@@ -80,8 +80,8 @@ static void nl_recv_msg(struct sk_buff *skb)
 			Offset = getParamFromPacketData(skb, 2);
 			nPages = getParamFromPacketData(skb, 3);
 			
-			printk(KERN_INFO "%s: RemoteID %lu \n", __FUNCTION__, RemoteID);
-			printk(KERN_INFO "%s: Offset %lu nPages %lu\n", __FUNCTION__, Offset, nPages);
+//			printk(KERN_INFO "%s: RemoteID %lu \n", __FUNCTION__, RemoteID);
+//			printk(KERN_INFO "%s: Offset %lu nPages %lu\n", __FUNCTION__, Offset, nPages);
 			COMEX_recv_fill((int)RemoteID, Offset, (int)nPages);
 			break;
 			

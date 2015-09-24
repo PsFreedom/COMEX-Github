@@ -36,7 +36,7 @@
 
 #define PORTOFFSET 62000
 
-#define VERBOSE 1
+//#define VERBOSE 1
 int work=1; // if set=0, init then  end, don't do the workload.
 int myinstanceNo;
 struct buffer {
@@ -129,7 +129,7 @@ struct rdma_cb* id2cb(int id){
 int id2cbNum(int id){
 	int i;
 	for(i=0;i<qpcount;i++){
-		printf("ID: %d\n", cbs[i]->instanceNo);
+//		printf("ID: %d\n", cbs[i]->instanceNo);
 		if(cbs[i]->instanceNo==id){
 			return i;
 		}
@@ -917,20 +917,21 @@ do_server(struct rdma_cb *cb[0],int cbcount) {
 #ifdef IS_SERVER
             case 2000:
 				COMEX_server_msg(qp2cb(retqpno)->recv_buffer.piggy);
-            break;
+				break;
             case 1000:
 				COMEX_server_cmd(qp2cb(retqpno)->recv_buffer.piggy);
-            break;
+				break;
 #endif
             case 5:
                 printf("piggy = %s\n",qp2cb(retqpno)->recv_buffer.piggy);
-            break;
+				break;
             case 2:
                 printf("Instance number info? why do i get it now?");
+				break;
             case -1:
                 printf("get disconnect msg\n"); // should be modify to handle more than one connection
                 work=0;
-            break;
+				break;
             default:
             printf("unexpected,unhandled immediate received=%d",retval);
         }
