@@ -1206,7 +1206,7 @@ extern unsigned long getPhyAddrLookUP(unsigned long entry);
 extern unsigned int getPageNumber(unsigned long entry);
 extern unsigned int getSizeOrder(unsigned long entry);
 
-extern void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, unsigned long endAddr, unsigned long Buffer_Addr, int MaxBuffer);
+extern void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, unsigned long endAddr, unsigned long Write_Buffer_Addr, unsigned long Read_Buffer_Addr, int MaxBuffer);
 extern void COMEX_Terminate(void);
 extern void COMEX_signal(int sigN);
 
@@ -1215,6 +1215,8 @@ extern void print_free_blocks(void);
 
 extern void COMEX_recv_fill(int RemoteID, unsigned long Offset, int order);
 extern void COMEX_recv_asked(int requester, int order);
+
+extern void NL_send_message(char *NetlinkMSG);
 
 int vma_wants_writenotify(struct vm_area_struct *vma);
 

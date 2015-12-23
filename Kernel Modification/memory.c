@@ -59,6 +59,7 @@
 #include <linux/gfp.h>
 #include <linux/migrate.h>
 #include <linux/string.h>
+#include <linux/delay.h>
 
 #include <asm/io.h>
 #include <asm/pgalloc.h>
@@ -333,9 +334,6 @@ static void tlb_remove_table_rcu(struct rcu_head *head)
 
 	free_page((unsigned long)batch);
 }
-
-
-
 
 void tlb_table_flush(struct mmu_gather *tlb)
 {

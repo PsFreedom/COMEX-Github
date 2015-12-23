@@ -1,11 +1,11 @@
-#define MAX_BUFFER 1024
+#define MAX_BUFFER 64
 
 unsigned long BUF_LEN;
 char *COMEX_Area = NULL;
 
 unsigned long get_Param_from_Packet(char *message, int pos){
 	int start=0, end=0;
-	char msgBuff[256];
+	char msgBuff[200];
 
 	strcpy(msgBuff, message);
 	while(pos > 0){

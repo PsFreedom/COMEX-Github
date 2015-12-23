@@ -23,7 +23,8 @@ struct msghdr msg;
 struct sigaction sig;
 
 char *COMEX_Area;
-char *COMEX_Buffer;
+char *COMEX_Write_Buffer;
+char *COMEX_Read_Buffer;
 
 void receiveData(int n, siginfo_t *info, void *unused) {
 	int cmd_number = info->si_int;
@@ -97,7 +98,7 @@ int main(int argc, char *argv[])
 	int shmid, totalCB, nodeID;
 	struct rdma_cb **cb_pointers;
 	unsigned long N_Pages, totalChar, i, j; //, Checksum=0;
-	unsigned long totalCOMEX, totalBuffer, totalMem;
+	unsigned long totalCOMEX, totalWriteBuffer, totalReadBuffer, totalMem;
 	char myMessage[200];
 	key_t key = 5683;
 	
@@ -111,8 +112,9 @@ int main(int argc, char *argv[])
 	printf("N_Pages %lu \n", N_Pages);
 	
 	totalCOMEX = sizeof(char)*totalChar;
-	totalBuffer = sizeof(char)*4096*MAX_BUFFER;
-	totalMem = totalCOMEX + totalBuffer;
+	totalWriteBuffer = sizeof(char)*4096*MAX_BUFFER;
+	totalReadBuffer = sizeof(char)*4096*MAX_BUFFER;
+	totalMem = totalCOMEX + totalWriteBuffer + totalReadBuffer;
 	printf("totalMem: %lu\n", totalMem);
 	
 	if ((shmid = shmget(key, totalMem, IPC_CREAT | 0666)) < 0) {
@@ -124,15 +126,16 @@ int main(int argc, char *argv[])
         exit(1);
     }
 	
-	COMEX_Buffer = COMEX_Area + totalChar;
-	for(i=0, j=0; i < totalChar + (4096*MAX_BUFFER); i+=4096, j++){
+	for(i=0, j=0; i < totalChar + (4096*MAX_BUFFER) + (4096*MAX_BUFFER); i+=4096, j++){
 		COMEX_Area[i] = j;
 	}
 	memset(COMEX_Area, 0, totalMem);
+	COMEX_Write_Buffer = COMEX_Area + totalChar;
+	COMEX_Read_Buffer = COMEX_Area + totalChar + 4096*MAX_BUFFER;
 	
 	init_Netlink();
 	init_SignalHandler();
-	sprintf(myMessage, "%d %d %d %lu %lu %lu %d", 0, nodeID, totalCB, COMEX_Area, &COMEX_Area[(N_Pages-1)*4096], COMEX_Buffer, MAX_BUFFER);
+	sprintf(myMessage, "%d %d %d %lu %lu %lu %lu %d", 0, nodeID, totalCB, COMEX_Area, &COMEX_Area[(N_Pages-1)*4096], COMEX_Write_Buffer, COMEX_Read_Buffer, MAX_BUFFER);
 	printf("%s\n", myMessage);
 	sendNLMssge(myMessage);
 

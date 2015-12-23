@@ -1352,6 +1352,67 @@ out_mlock:
 	}
 	return ret;
 }
+int try_to_unmap_one_COMEX(struct page *page, struct vm_area_struct *vma,
+		     unsigned long address, enum ttu_flags flags, int NodeID, long RemoteOffset)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	pte_t *pte;
+	pte_t pteval;
+	spinlock_t *ptl;
+	swp_entry_t entry;
+	int ret = SWAP_AGAIN;
+	unsigned long offsetField = 0;
+
+	pte = page_check_address(page, mm, address, &ptl, 0);
+	if (!pte)
+		goto out;
+
+	/* Nuke the page table entry. */
+	flush_cache_page(vma, address, page_to_pfn(page));
+	pteval = ptep_clear_flush(vma, address, pte);
+
+	/* Update high watermark before we lower rss */
+	update_hiwater_rss(mm);
+
+	dec_mm_counter(mm, MM_ANONPAGES);
+	
+	offsetField = NodeID + (RemoteOffset<<10);
+	entry = swp_entry(8, offsetField);
+
+	set_pte_at(mm, address, pte, swp_entry_to_pte(entry));
+	BUG_ON(pte_file(*pte));
+
+	page_remove_rmap(page);
+	page_cache_release(page);
+
+out_unmap:
+	pte_unmap_unlock(pte, ptl);
+	if (ret != SWAP_FAIL)
+		mmu_notifier_invalidate_page(mm, address);
+out:
+	return ret;
+
+out_mlock:
+	pte_unmap_unlock(pte, ptl);
+
+
+	/*
+	 * We need mmap_sem locking, Otherwise VM_LOCKED check makes
+	 * unstable result and race. Plus, We can't wait here because
+	 * we now hold anon_vma->rwsem or mapping->i_mmap_mutex.
+	 * if trylock failed, the page remain in evictable lru and later
+	 * vmscan could retry to move the page to unevictable lru if the
+	 * page is actually mlocked.
+	 */
+	if (down_read_trylock(&vma->vm_mm->mmap_sem)) {
+		if (vma->vm_flags & VM_LOCKED) {
+			mlock_vma_page(page);
+			ret = SWAP_MLOCK;
+		}
+		up_read(&vma->vm_mm->mmap_sem);
+	}
+	return ret;
+}
 
 /*
  * objrmap doesn't work for nonlinear VMAs because the assumption that
@@ -1543,6 +1604,43 @@ static int try_to_unmap_anon(struct page *page, enum ttu_flags flags)
 	page_unlock_anon_vma_read(anon_vma);
 	return ret;
 }
+static int try_to_unmap_anon_COMEX(struct page *page, enum ttu_flags flags, int NodeID, long RemoteOffset)
+{
+	struct anon_vma *anon_vma;
+	pgoff_t pgoff;
+	struct anon_vma_chain *avc;
+	int ret = SWAP_AGAIN;
+
+	anon_vma = page_lock_anon_vma_read(page);
+	if (!anon_vma)
+		return ret;
+
+	pgoff = page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
+	anon_vma_interval_tree_foreach(avc, &anon_vma->rb_root, pgoff, pgoff) {
+		struct vm_area_struct *vma = avc->vma;
+		unsigned long address;
+
+		/*
+		 * During exec, a temporary VMA is setup and later moved.
+		 * The VMA is moved under the anon_vma lock but not the
+		 * page tables leading to a race where migration cannot
+		 * find the migration ptes. Rather than increasing the
+		 * locking requirements of exec(), migration skips
+		 * temporary VMAs until after exec() completes.
+		 */
+		if (IS_ENABLED(CONFIG_MIGRATION) && (flags & TTU_MIGRATION) &&
+				is_vma_temporary_stack(vma))
+			continue;
+
+		address = vma_address(page, vma);
+		ret = try_to_unmap_one_COMEX(page, vma, address, flags, NodeID, RemoteOffset);
+		if (ret != SWAP_AGAIN || !page_mapped(page))
+			break;
+	}
+
+	page_unlock_anon_vma_read(anon_vma);
+	return ret;
+}
 
 /**
  * try_to_unmap_file - unmap/unlock file page using the object-based rmap method
@@ -1682,6 +1780,19 @@ int try_to_unmap(struct page *page, enum ttu_flags flags)
 		ret = try_to_unmap_anon(page, flags);
 	else
 		ret = try_to_unmap_file(page, flags);
+	if (ret != SWAP_MLOCK && !page_mapped(page))
+		ret = SWAP_SUCCESS;
+	return ret;
+}
+int try_to_unmap_COMEX(struct page *page, enum ttu_flags flags, int NodeID, long RemoteOffset)
+{
+	int ret;
+
+	BUG_ON(!PageLocked(page));
+	VM_BUG_ON(!PageHuge(page) && PageTransHuge(page));
+
+	ret = try_to_unmap_anon_COMEX(page, flags, NodeID, RemoteOffset);
+
 	if (ret != SWAP_MLOCK && !page_mapped(page))
 		ret = SWAP_SUCCESS;
 	return ret;

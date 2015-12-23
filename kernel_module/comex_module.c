@@ -42,7 +42,7 @@ unsigned long getParamFromPacketData(struct sk_buff *skb, int pos){
 static void nl_recv_msg(struct sk_buff *skb)
 {
 	unsigned long cmdNumber;
-	unsigned long NodeID, N_Nodes, COMEX_Address, COMEX_Address_End, Buffer_Address, MaxBuffer;	// for case 0: 
+	unsigned long NodeID, N_Nodes, COMEX_Address, COMEX_Address_End, Write_Buffer_Address, Read_Buffer_Address, MaxBuffer;	// for case 0: 
 	unsigned long RemoteID, Offset, nPages;		// for case 100:
 	unsigned long requester, Order;	// for case 1100:
 	
@@ -57,14 +57,15 @@ static void nl_recv_msg(struct sk_buff *skb)
 			N_Nodes = getParamFromPacketData(skb, 2);
 			COMEX_Address = getParamFromPacketData(skb, 3);
 			COMEX_Address_End = getParamFromPacketData(skb, 4);
-			Buffer_Address = getParamFromPacketData(skb, 5);
-			MaxBuffer = getParamFromPacketData(skb, 6);
+			Write_Buffer_Address = getParamFromPacketData(skb, 5);
+			Read_Buffer_Address = getParamFromPacketData(skb, 6);
+			MaxBuffer = getParamFromPacketData(skb, 7);
 			
-			printk(KERN_INFO "%s: NodeID %lu N_Nodes %lu", __FUNCTION__, NodeID, N_Nodes);
-			printk(KERN_INFO "%s: COMEX_Adress %lu COMEX_End %lu", __FUNCTION__, COMEX_Address, COMEX_Address_End);
-			printk(KERN_INFO "%s: Buffer_Address %lu MaxBuffer %lu", __FUNCTION__, Buffer_Address, MaxBuffer);
+			printk(KERN_INFO "%s: NodeID %lu N_Nodes %lu \n", __FUNCTION__, NodeID, N_Nodes);
+			printk(KERN_INFO "%s: COMEX_Adress %lu COMEX_End %lu \n", __FUNCTION__, COMEX_Address, COMEX_Address_End);
+			printk(KERN_INFO "%s: Write_Buffer_Address %lu Read_Buffer_Address %lu MaxBuffer %lu \n", __FUNCTION__, Write_Buffer_Address, Read_Buffer_Address, MaxBuffer);
 			COMEX_init_ENV((int)COMEX_PID, (int)NodeID, (int)N_Nodes, 
-							COMEX_Address, COMEX_Address_End, Buffer_Address, (int)MaxBuffer);
+							COMEX_Address, COMEX_Address_End, Write_Buffer_Address, Read_Buffer_Address,(int)MaxBuffer);
 			break;
 			
 		case 1100:

@@ -95,19 +95,22 @@ int main(int argc, char *argv[])
 		cmdNo = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 0);
 		switch(cmdNo){
 			case 1100:	// Request for pages
+				printf("   %s: %s\n", __FUNCTION__, NLMSG_DATA(nlh));
+				
 				target = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 1);
 				Order = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 2);
 				
-//				printf("   Request Target %d size %d\n", target, Order);
 				sprintf(RDMAmsg,"1100 %d %d", nodeID, Order); sendRDMA_CB_number(target, 1000);
 				break;
 			case 1101:	// Reply with pages
+				printf("   %s: %s\n", __FUNCTION__, NLMSG_DATA(nlh));
+				
 				target = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 1);
 				Offset = get_Param_from_Packet(NLMSG_DATA(nlh), 2);
 				Order = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 3);
 				oriOrder = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 4);
 				
-				if(Offset == 18446744073709551615){		// MAX unsigned long (-1)
+				if(Offset == 200){		// MAX unsigned long (-1)
 					printf("	not enough pages");
 				}
 				else{
@@ -115,16 +118,18 @@ int main(int argc, char *argv[])
 				}
 				break;
 			case 2100:	// Write page to remote node
+				printf("   %s: %s\n", __FUNCTION__, NLMSG_DATA(nlh));
+				
 				bufferOffset = get_Param_from_Packet(NLMSG_DATA(nlh), 1);
 				target = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 2);
 				Offset = get_Param_from_Packet(NLMSG_DATA(nlh), 3);
-				Size = (unsigned int)get_Param_from_Packet(NLMSG_DATA(nlh), 4);
+				Size = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 4);
 				
-//				do_write(cb_pointers[target], bufferOffset, Offset, Size*4096);
+				do_write(cb_pointers[target], bufferOffset, Offset, Size*4096);
 //				sprintf(RDMAmsg,"9100 %lu", Offset); sendRDMA_CB_number(target, 1000);
 				break;
 			default:
-				printf(">>> default: %s", NLMSG_DATA(nlh));
+				printf(">>> default: %s\n", NLMSG_DATA(nlh));
 				break;
 		}
     }

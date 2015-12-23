@@ -708,7 +708,10 @@ unsigned long COMEX_start_addr;
 unsigned long *comexLookUP;
 
 static spinlock_t COMEX_Buddy_lock;
-static spinlock_t COMEX_Remote_lock;
+static spinlock_t COMEX_Remote_lock_Drain;
+
+atomic_t ShrinkPL_counter;
+struct semaphore COMEX_Remote_MUTEX;
 
 struct COMEX_free_area {
 	struct list_head	free_list[1];
@@ -741,12 +744,18 @@ int COMEX_Node_ID = 0;
 int COMEX_Total_Nodes = 0;
 int COMEX_MAX_Buffer = 0;
 
-unsigned long COMEX_buffer_addr;
+unsigned long COMEX_Write_buffer_addr;
+unsigned long COMEX_Read_buffer_addr;
+unsigned long Head_R_offset;
+unsigned long Prev_R_offset = 0;
+unsigned long RDMA_jiffies = 0;
+unsigned long Request_jiffies = 0;
 
 int JumpThreshold = 5;
 int bufferHead = 0;
 int bufferTail = 0;
-int prevNodeID = 0;
+int bufferNew = 0;
+int HeadNodeID = 0;
 
 void NL_send_message(char *NetlinkMSG);
 int powOrder(int Order);
@@ -764,14 +773,12 @@ typedef struct COMEX_remote_page_desc{
 typedef struct COMEX_remote_list_header{
 	struct list_head listHeader;
 	int totalGroup;
-	int requestLock;
 } COMEX_R_Header;
 COMEX_R_Header *COMEX_R_Freelist;
 
 typedef struct COMEX_buffer_descriptor{
 	struct page *pageDesc;
 	unsigned long Offset;
-	int isFree;
 } COMEXbuffer;
 COMEXbuffer *bufferDesc;
 
@@ -793,85 +800,136 @@ void print_COMEX_Freelist(int listNO){
 
 unsigned long COMEX_drain_R_list(int listNO){
 	unsigned long offset = 0;
+	unsigned long flags;
 	COMEX_R_pages_group *R_group;
 	
-	R_group = list_first_entry(&COMEX_R_Freelist[listNO].listHeader, COMEX_R_pages_group, listPointer);
-	offset = R_group->Offset_start;
-	R_group->Offset_start = R_group->Offset_start + X86PageSize;
+	local_irq_save(flags);
+	spin_lock_irqsave(&COMEX_Remote_lock_Drain, flags);
 	
-	if(R_group->Offset_start >= R_group->Offset_end){
-		list_del(&R_group->listPointer);
-		COMEX_R_Freelist[listNO].totalGroup--;
-//		printk(KERN_INFO "%s: list_del\n", __FUNCTION__);
-//		print_COMEX_Freelist(listNO);
+	R_group = list_first_entry(&COMEX_R_Freelist[listNO].listHeader, COMEX_R_pages_group, listPointer);
+	if(!R_group){
+		return 200;
 	}
-
-//	printk(KERN_INFO "%s: %lu - %lu\n", __FUNCTION__, R_group->Offset_start, R_group->Offset_end);
+	
+	offset = R_group->Offset_start;
+	R_group->Offset_start = R_group->Offset_start + X86PageSize;		
+	if(R_group->Offset_start == R_group->Offset_end){		
+		R_group->Offset_start = 0;
+		COMEX_R_Freelist[listNO].totalGroup--;
+		list_del(&R_group->listPointer);
+		vfree(R_group);
+	}
+	
+	spin_unlock(&COMEX_Remote_lock_Drain);	
 	return offset;
 }
 
 int COMEX_Hash(int nodeID, int PID){
-	return ((nodeID+1)*PID*3*5*7*11)%COMEX_Total_Nodes;
+	return ((nodeID+1)*PID*3*5*7*11)%COMEX_Total_Nodes;	//Fixxxx
+//	return ((nodeID+1)*PID*3*5*7*11)%10;	//Fixxxx
 }
 
-int COMEX_move_to_Remote(struct page *page){
+int COMEX_move_to_Remote(struct page *page, int *retNodeID, long *retRemoteOffset){
 
 	char NetlinkMSG[200];
-	int i, listNO=0, firstPID=0, Order=10;
-	unsigned long COMEX_address, Offset, R_offset, Size=1;
+	int i, listNO=0, firstPID=0, Order=10, Total;
+	unsigned long flags;
+	unsigned long Offset, Buffer_address, R_offset;
 	
+	COMEX_R_pages_group *R_group;
+	
+	local_irq_save(flags);
 	firstPID = get_Frist_PID(page);
 	listNO = COMEX_Hash(COMEX_Node_ID, firstPID);
 	
-	for(i=0; i<JumpThreshold; i++){
-		if(!list_empty(&COMEX_R_Freelist[listNO].listHeader)){
-			if(bufferDesc[bufferTail].isFree == 0){
-				Offset = bufferTail*X86PageSize;
-				COMEX_address = COMEX_buffer_addr + Offset;
-				
-				copy_user_highpage(bufferDesc[bufferTail].pageDesc, page, COMEX_address, COMEX_vma);
-				R_offset = COMEX_drain_R_list(listNO);
-				
-				sprintf(NetlinkMSG, "2100 %lu %d %lu %d", bufferDesc[bufferTail].Offset, listNO, R_Offset, Size);
+	if(jiffies >= RDMA_jiffies){
+		for(i=0; i<JumpThreshold; i++){
+			if(COMEX_R_Freelist[listNO].totalGroup < 8 && jiffies >= Request_jiffies){
+				sprintf(NetlinkMSG, "1100 %d %d  ", listNO, Order);
 				NL_send_message(NetlinkMSG);
-				
-//				printk(KERN_INFO "%s: bufferTail %d\n", __FUNCTION__, bufferTail);
-//				bufferDesc[bufferTail].isFree = 1;
-				bufferTail = (bufferTail+1)%COMEX_MAX_Buffer;
+				Request_jiffies = jiffies + 50;
 			}
-			prevNodeID = listNO;
-			return -1;
+			if(COMEX_R_Freelist[listNO].totalGroup > 0){
+				Offset = bufferTail*X86PageSize;
+				Buffer_address = COMEX_Write_buffer_addr + Offset;
+				
+				R_offset = COMEX_drain_R_list(listNO);
+				if(R_offset == 200){
+					break;
+				}
+				copy_user_highpage(bufferDesc[bufferTail].pageDesc, page, Buffer_address, COMEX_vma);
+				bufferTail++;
+				if(bufferNew == 0){
+					Head_R_offset = R_offset;
+					HeadNodeID = listNO;
+					bufferNew = 1;
+				}
+				else if(Prev_R_offset + X86PageSize != R_offset || HeadNodeID != listNO){
+					Total = (bufferTail - bufferHead) - 1;
+					sprintf(NetlinkMSG, "2100 %lu %d %lu %d  ", bufferDesc[bufferHead].Offset, HeadNodeID, Head_R_offset, Total);
+					NL_send_message(NetlinkMSG);
+					
+					bufferHead = bufferTail-1;
+					Head_R_offset = R_offset;
+					HeadNodeID = listNO;
+					RDMA_jiffies = jiffies + Total*10+40;
+				}				
+				if(bufferTail == COMEX_MAX_Buffer){
+					Total = bufferTail - bufferHead;
+					sprintf(NetlinkMSG, "2100 %lu %d %lu %d  ", bufferDesc[bufferHead].Offset, HeadNodeID, Head_R_offset, Total);
+					NL_send_message(NetlinkMSG);
+				
+					bufferTail = 0;
+					bufferHead = 0;
+					bufferNew = 0;
+					RDMA_jiffies = jiffies + Total*10+40;
+				}
+				Prev_R_offset = R_offset;
+				*retNodeID = listNO;
+				*retRemoteOffset = R_offset;
+				return 1;
+			}
+			listNO = COMEX_Hash(listNO, firstPID);
 		}
-		else if(COMEX_R_Freelist[listNO].requestLock > 0){
-			COMEX_R_Freelist[listNO].requestLock--;
-			sprintf(NetlinkMSG, "1100 %d %d ", listNO, Order);
-			NL_send_message(NetlinkMSG);
-		}
-		listNO = COMEX_Hash(listNO, firstPID);
 	}
 	return -1;
 }
 
+void COMEX_flush_to_Remote(){
+	char NetlinkMSG[200];
+	int Total;
+	if(bufferHead != bufferTail){
+		Total = bufferTail - bufferHead;
+		sprintf(NetlinkMSG, "2100 %lu %d %lu %d  ", bufferDesc[bufferHead].Offset, HeadNodeID, Head_R_offset, Total);
+		NL_send_message(NetlinkMSG);
+
+		bufferTail = 0;
+		bufferHead = 0;
+		bufferNew = 0;
+		RDMA_jiffies = jiffies + Total*10+40;
+	}
+}
+
 void COMEX_recv_fill(int RemoteID, unsigned long Offset, int order){
+	unsigned long flags;
 	int i, nPages;
 	COMEX_R_pages_group *rGroup;
 	
+	local_irq_save(flags);	
 	nPages = powOrder(order);	
+	
 	rGroup = (COMEX_R_pages_group *)vmalloc(sizeof(COMEX_R_pages_group));
 	rGroup->R_NodeID = RemoteID;
 	rGroup->Offset_start = Offset;
-	rGroup->Offset_end = Offset + (nPages*4096);
-	rGroup->listPointer;
+	rGroup->Offset_end = Offset + (nPages*X86PageSize);
+	INIT_LIST_HEAD(&rGroup->listPointer);
+	
+	spin_lock_irqsave(&COMEX_Remote_lock_Drain, flags);
 	
 	list_add_tail(&rGroup->listPointer, &COMEX_R_Freelist[RemoteID].listHeader);
 	COMEX_R_Freelist[RemoteID].totalGroup++;
-	
-//	printk(KERN_INFO "%s: RemoteID %d | Offset %lu | order %d\n", __FUNCTION__, RemoteID, Offset, order);
-//	printk(KERN_INFO "%s: nPages %d ID %d start %lu end %lu\n", __FUNCTION__, nPages, rGroup->R_NodeID, rGroup->Offset_start, rGroup->Offset_end);
-	
-//	print_all_COMEX_Freelist();
-//	print_COMEX_Freelist(RemoteID);
-	COMEX_R_Freelist[RemoteID].requestLock++;		// Fixxx
+
+	spin_unlock(&COMEX_Remote_lock_Drain);
 }
 EXPORT_SYMBOL(COMEX_recv_fill);
 
@@ -879,15 +937,17 @@ void COMEX_recv_asked(int requester, int order){
 
 	char NetlinkMSG[200];
 	int oriOrder = order;
-	unsigned long Offset = -1;
+	unsigned long Offset = 200;
 	
 	if(COMEX_Ready == 1){
 		Offset = COMEX_get_from_Buddy(order);
-		while(Offset == -1 && order > 5){
+		while(Offset == 200 && order > 5){
 			order--;
 			Offset = COMEX_get_from_Buddy(order);
 		}
-		sprintf(NetlinkMSG, "1101 %d %lu %d %d", requester, Offset, order, oriOrder);
+		
+//		printk(KERN_INFO "%s: requester %d order %d\n", __FUNCTION__, requester, order);
+		sprintf(NetlinkMSG, "1101 %d %lu %d %d  ", requester, Offset, order, oriOrder);
 		NL_send_message(NetlinkMSG);
 	}
 }
@@ -1166,14 +1226,16 @@ unsigned long COMEX_rmqueue_smallest(unsigned int order){
 		return page->pageNO + 1;
 	}
 
-	return -1;
+	return 0;
 }
 
 unsigned long COMEX_get_from_Buddy(int order){
 	unsigned long pageNO = 0;
+	unsigned long flags;
 	
-	spin_unlock_wait(&COMEX_Buddy_lock);
-	spin_lock(&COMEX_Buddy_lock);
+	local_irq_save(flags);
+	spin_lock_irqsave(&COMEX_Buddy_lock, flags);
+	
 	pageNO = COMEX_rmqueue_smallest(order);
 	spin_unlock(&COMEX_Buddy_lock);
 	
@@ -1181,13 +1243,14 @@ unsigned long COMEX_get_from_Buddy(int order){
 	if(pageNO > 0)
 		return (pageNO-1)*X86PageSize;
 	
-	return -1;
+	return 200;
 }
 
 void COMEX_free_to_Buddy(unsigned long pageNO, unsigned int order){
-
-	spin_unlock_wait(&COMEX_Buddy_lock);
-	spin_lock(&COMEX_Buddy_lock);
+	unsigned long flags;
+	
+	local_irq_save(flags);
+	spin_lock_irqsave(&COMEX_Buddy_lock, flags);
 	COMEX_free_one_page(pageNO, order);
 	spin_unlock(&COMEX_Buddy_lock);
 	
@@ -1196,11 +1259,11 @@ void COMEX_free_to_Buddy(unsigned long pageNO, unsigned int order){
 
 void COMEX_free_to_Buddy_Addr(unsigned long Addr, unsigned int order){
 
-	unsigned long pageNO;
+	unsigned long pageNO, flags;
 	pageNO = (Addr - COMEX_start_addr)/X86PageSize;
 
-	spin_unlock_wait(&COMEX_Buddy_lock);
-	spin_lock(&COMEX_Buddy_lock);
+	local_irq_save(flags);
+	spin_lock_irqsave(&COMEX_Buddy_lock, flags);
 	COMEX_free_one_page(pageNO, order);
 	spin_unlock(&COMEX_Buddy_lock);
 	
@@ -1231,10 +1294,9 @@ void init_Remote(void){
 	bufferDesc = (COMEXbuffer *)vmalloc(sizeof(COMEXbuffer)*COMEX_MAX_Buffer);
 	for(i=0; i<COMEX_MAX_Buffer; i++){
 	
-		bufferDesc[i].isFree = 0;
-		bufferDesc[i].Offset = COMEX_buffer_addr - COMEX_start_addr + offset;
+		bufferDesc[i].Offset = COMEX_Write_buffer_addr - COMEX_start_addr + offset;
 		
-		tmpStartAddr = COMEX_buffer_addr + offset;
+		tmpStartAddr = COMEX_Write_buffer_addr + offset;
 		COMEX_pgd = pgd_offset(COMEX_mm, tmpStartAddr);
 		if (pgd_none(*COMEX_pgd) || pgd_bad(*COMEX_pgd)){
 			printk(KERN_INFO "%s: PGD bug\n", __FUNCTION__);
@@ -1253,15 +1315,14 @@ void init_Remote(void){
 		bufferDesc[i].pageDesc = COMEXpageDesc;
 		pte_unmap_unlock(COMEX_ptep, COMEX_ptl);
 	
-//		printk(KERN_INFO "%s: bufferDesc->pageDesc %lu\n",__FUNCTION__, bufferDesc[i].pageDesc);
 		offset = offset + X86PageSize;
-	}
+	}	
+	printk(KERN_INFO "%s: COMEX_Total_Nodes -> %d\n",__FUNCTION__, COMEX_Total_Nodes);	
 	
-	printk(KERN_INFO "%s: COMEX_Total_Nodes -> %d\n",__FUNCTION__, COMEX_Total_Nodes);
 	COMEX_R_Freelist = (COMEX_R_Header *)vmalloc(sizeof(COMEX_R_Header)*COMEX_Total_Nodes);
 	for(i=0; i<COMEX_Total_Nodes; i++){
 		INIT_LIST_HEAD(&COMEX_R_Freelist[i].listHeader);
-		COMEX_R_Freelist[i].requestLock = 10;	// Fixxx
+		COMEX_R_Freelist[i].totalGroup = 0;
 	}
 }
 
@@ -1285,6 +1346,7 @@ void NL_send_message(char *NetlinkMSG){
     if(res < 0)
         printk(KERN_INFO "Error while sending bak to user\n");
 }
+EXPORT_SYMBOL(NL_send_message);
 
 static void Kernel_nl_recv_msg(struct sk_buff *skb){
 	char NetlinkMSG[200];
@@ -1297,7 +1359,7 @@ static void Kernel_nl_recv_msg(struct sk_buff *skb){
     	COMEX_Ready = 1;
     }
     
-    sprintf(NetlinkMSG, "Init successfully !");
+    sprintf(NetlinkMSG, (char *)nlmsg_data(nlh));
     NL_send_message(NetlinkMSG);
 }
 
@@ -1314,7 +1376,7 @@ int init_NetLink(void){
     return 1;
 }
 
-void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, unsigned long endAddr, unsigned long Buffer_Addr, int MaxBuffer){
+void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, unsigned long endAddr, unsigned long Write_Buffer_Addr, unsigned long Read_Buffer_Addr, int MaxBuffer){
 
 	unsigned long *allPhyAddr, tmpStartAddr;
 	unsigned int *allPageNO;
@@ -1338,21 +1400,24 @@ void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, u
 	COMEX_Node_ID = NodeID;
 	COMEX_Total_Nodes = N_Nodes;
 	COMEX_start_addr = startAddr;
-	COMEX_buffer_addr = Buffer_Addr;
+	COMEX_Write_buffer_addr = Write_Buffer_Addr;
+	COMEX_Read_buffer_addr = Read_Buffer_Addr;
 	COMEX_MAX_Buffer = MaxBuffer;
 	
-	printk(KERN_INFO "%s: COMEX_Ready %d COMEX_PID %d \n", __FUNCTION__, COMEX_Ready, COMEX_PID);	
+	printk(KERN_INFO "%s: COMEX_Ready %d COMEX_PID %d \n", __FUNCTION__, COMEX_Ready, COMEX_PID);
 	printk(KERN_INFO "%s: NodeID %d N_Nodes %d \n", __FUNCTION__, COMEX_Node_ID, COMEX_Total_Nodes);
 	printk(KERN_INFO "%s: Start address %lu End Address %lu \n", __FUNCTION__, COMEX_start_addr, endAddr);
-	printk(KERN_INFO "%s: Buffer address %lu Total Buffer %d \n", __FUNCTION__, COMEX_buffer_addr, MaxBuffer);
+	printk(KERN_INFO "%s: W_Buffer %lu R_Buffer %lu Total Buffer %d \n", __FUNCTION__, COMEX_Write_buffer_addr, COMEX_Read_buffer_addr, MaxBuffer);
 	
 	tmpStartAddr = startAddr;
 	nPages = ((endAddr-startAddr) / X86PageSize) +1;
 	
 	////////////////////	Init COMEX Buddy System	//////////////////// 
 	
+	sema_init(&COMEX_Remote_MUTEX, 1);
+	atomic_set(&ShrinkPL_counter, 0);
 	spin_lock_init(&COMEX_Buddy_lock);
-	spin_lock_init(&COMEX_Remote_lock);
+	spin_lock_init(&COMEX_Remote_lock_Drain);	
 	COMEX_Buddy_Zone = (COMEX_Zone *)vmalloc(sizeof(COMEX_Zone));
 	COMEX_Buddy_page = (COMEX_page *)vmalloc(sizeof(COMEX_page)*nPages);
 	
@@ -1499,7 +1564,7 @@ int COMEX_move_to_COMEX(struct page *old_page){
 	spinlock_t *old_ptl;
 	
 	COMEX_address = COMEX_get_from_Buddy(0);
-	if(COMEX_address == -1){
+	if(COMEX_address == 200){
 		printk(KERN_INFO "%s: COMEX_address == 0\n", __FUNCTION__);
 		return 0;
 	}
@@ -1593,7 +1658,7 @@ int get_Frist_PID(struct page *page){
 	pgoff_t pgoff;
 	struct anon_vma *anon_vma;
 	struct anon_vma_chain *avc;
-	int ret = -1;
+	int ret = 0;
 	
 	anon_vma = page_lock_anon_vma_read(page);
 	if (!anon_vma){
@@ -1616,6 +1681,7 @@ int get_Frist_PID(struct page *page){
 		
 		if(!myTask)
 			return 0;
+			
 		ret = myTask->pid;
 		break;
 	}	
@@ -1645,9 +1711,13 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 
 	LIST_HEAD(sorted_list);	
 	int target_PID, Min_PID;
+	int NodeID; 
+	long RemoteOffset;
 	struct page *target_page, *temp;
-	if(COMEX_Ready == 1){	
-		while (!list_empty(page_list)) {	
+	
+	atomic_inc(&ShrinkPL_counter);
+/*	if(COMEX_Ready == 1){
+		while (!list_empty(page_list)) {
 			Min_PID = INT_MAX;
 			
 			list_for_each_entry(target_page, page_list, lru) {
@@ -1671,7 +1741,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			list_move(&target_page->lru, page_list);
 		}
 	}
-	
+*/
 	cond_resched();
 
 	mem_cgroup_uncharge_start();
@@ -1682,6 +1752,9 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		enum page_references references = PAGEREF_RECLAIM_CLEAN;
 
 		cond_resched();
+		
+		NodeID = -1;
+		RemoteOffset = -1;
 
 		page = lru_to_page(page_list);
 		list_del(&page->lru);
@@ -1761,20 +1834,26 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			if (!(sc->gfp_mask & __GFP_IO))
 				goto keep_locked;
 			if(COMEX_Ready == 1){
-//				printk(KERN_INFO "%s: COMEX_Ready\n", __FUNCTION__);
 //				if(COMEX_move_to_COMEX(page) == 1){
 //					goto COMEX_Out;
 //				}
-//				printk(KERN_INFO "%s: COMEX_Ready\n", __FUNCTION__);
-				if(COMEX_move_to_Remote(page) != -1){
-					goto COMEX_Out;
+				down_interruptible(&COMEX_Remote_MUTEX);
+				if(COMEX_move_to_Remote(page, &NodeID, &RemoteOffset) != -1){
+					up(&COMEX_Remote_MUTEX);
+					try_to_unmap_COMEX(page, ttu_flags, NodeID, RemoteOffset);
+					
+					page->mapping == NULL;
+					ClearPageDirty(page);
+					unlock_page(page);
+					atomic_set(&page->_count,0);
+					goto free_it;
 				}
+				up(&COMEX_Remote_MUTEX);
 			}
 			if (!add_to_swap(page, page_list))
 				goto activate_locked;
 			may_enter_fs = 1;
 		}
-COMEX_Out:
 		mapping = page_mapping(page);
 
 		/*
@@ -1934,6 +2013,11 @@ keep:
 		list_add(&page->lru, &ret_pages);
 		VM_BUG_ON(PageLRU(page) || PageUnevictable(page));
 	}
+	
+	if(atomic_read(&ShrinkPL_counter) == 1){
+		COMEX_flush_to_Remote();
+	}
+	atomic_dec(&ShrinkPL_counter);
 
 	/*
 	 * Tag a zone as congested if all the dirty pages encountered were
