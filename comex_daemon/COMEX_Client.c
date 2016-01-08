@@ -43,7 +43,7 @@ int init_NetLink(){
 	nlh->nlmsg_len = NLMSG_SPACE(MAX_PAYLOAD);
 	nlh->nlmsg_pid = getpid();
 	nlh->nlmsg_flags = 0;
-	strcpy(NLMSG_DATA(nlh), "Hello");
+	strcpy(NLMSG_DATA(nlh), "1");
 	iov.iov_base = (void *)nlh;
 	iov.iov_len = nlh->nlmsg_len;
 	msg.msg_name = (void *)&dest_addr;
@@ -87,8 +87,8 @@ int main(int argc, char *argv[])
 	}
 	
 	init_NetLink();
-	recvmsg(sock_fd, &msg, 0);		
-	printf("   Received message payload: %s\n", NLMSG_DATA(nlh));
+//	recvmsg(sock_fd, &msg, 0);		
+//	printf("   Received message payload: %s\n", NLMSG_DATA(nlh));
     while(1){
 		recvmsg(sock_fd, &msg, 0);
 //		printf("   %s: %s\n", __FUNCTION__, NLMSG_DATA(nlh));
@@ -127,6 +127,12 @@ int main(int argc, char *argv[])
 				
 				do_write(cb_pointers[target], bufferOffset, Offset, Size*4096);
 //				sprintf(RDMAmsg,"9100 %lu", Offset); sendRDMA_CB_number(target, 1000);
+				break;
+			case 3000:
+				printf("   %s: %s\n", __FUNCTION__, NLMSG_DATA(nlh));
+				
+//				strcpy(NLMSG_DATA(nlh), "Test Sem");
+//				sendmsg(sock_fd, &msg, 0);
 				break;
 			default:
 				printf(">>> default: %s\n", NLMSG_DATA(nlh));

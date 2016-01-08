@@ -712,6 +712,7 @@ static spinlock_t COMEX_Remote_lock_Drain;
 
 atomic_t ShrinkPL_counter;
 struct semaphore COMEX_Remote_MUTEX;
+struct semaphore COMEX_ReadBack_MUTEX;
 
 struct COMEX_free_area {
 	struct list_head	free_list[1];
@@ -1359,8 +1360,8 @@ static void Kernel_nl_recv_msg(struct sk_buff *skb){
     	COMEX_Ready = 1;
     }
     
-    sprintf(NetlinkMSG, (char *)nlmsg_data(nlh));
-    NL_send_message(NetlinkMSG);
+//	sprintf(NetlinkMSG, (char *)nlmsg_data(nlh));
+//	NL_send_message(NetlinkMSG);
 }
 
 int init_NetLink(void){
@@ -1415,6 +1416,7 @@ void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, u
 	////////////////////	Init COMEX Buddy System	//////////////////// 
 	
 	sema_init(&COMEX_Remote_MUTEX, 1);
+	sema_init(&COMEX_ReadBack_MUTEX, 1);
 	atomic_set(&ShrinkPL_counter, 0);
 	spin_lock_init(&COMEX_Buddy_lock);
 	spin_lock_init(&COMEX_Remote_lock_Drain);	

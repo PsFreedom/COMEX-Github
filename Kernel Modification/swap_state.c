@@ -303,7 +303,8 @@ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 			struct vm_area_struct *vma, unsigned long addr)
 {
 	struct page *found_page, *new_page = NULL;
-	int err;
+	int err, NodeID;
+	unsigned long offsetField;
 	char NetlinkMSG[200];
 
 	do {
@@ -376,7 +377,12 @@ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 				swap_readpage(new_page);
 			}
 			else{
-				sprintf(NetlinkMSG, "3000 read_swap_cache_async Ready");
+				offsetField = (unsigned long)swp_offset(entry);
+				NodeID = (int)offsetField & 1023;
+				offsetField = offsetField >> 10;
+
+				sprintf(NetlinkMSG, "3000 %d %lu ", NodeID, offsetField);
+//				sprintf(NetlinkMSG, "3000 Testttt ");
 				NL_send_message(NetlinkMSG);
 			}
 			return new_page;

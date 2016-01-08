@@ -1198,6 +1198,8 @@ static inline void sync_mm_rss(struct mm_struct *mm)
 }
 #endif
 
+extern struct semaphore COMEX_ReadBack_MUTEX;
+
 extern unsigned int COMEX_Ready;
 extern unsigned long *comexLookUP;
 extern unsigned int totalLookUPEntry;

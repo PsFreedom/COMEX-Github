@@ -514,7 +514,10 @@ static struct swap_info_struct *swap_info_get(swp_entry_t entry)
 		goto out;
 	type = swp_type(entry);
 	if(type == 8){
-		p = swap_info[0];	// COMEX
+//		p = swap_info[8];	// COMEX
+//		spin_lock(&p->lock);
+//		return p;
+		goto out;
 	}
 	if (type >= nr_swapfiles)
 		goto bad_nofile;
