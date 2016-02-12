@@ -1,7 +1,40 @@
 #define MAX_BUFFER 64
+#define COMM_BUFFER 16384
+
+typedef struct{
+	int	NodeID;
+	int	totalCB;
+}CommStruct;
+CommStruct *myCommStruct = NULL;
 
 unsigned long BUF_LEN;
 char *COMEX_Area = NULL;
+
+/////////////////////////////////////////	Message Struct
+
+typedef struct{
+	int	NodeID;
+	int	N_Nodes;
+	unsigned long COMEX_Address;
+	unsigned long COMEX_Address_End;
+	unsigned long Write_Buffer_Address;
+	unsigned long Read_Buffer_Address;
+	unsigned long MaxBuffer;
+	unsigned long Comm_Buffer_Address;
+}initStruct;
+
+typedef struct{
+	int Requester;
+	int Order;
+}request1Struct;
+
+typedef struct{
+	int remoteID;
+	unsigned long offset;
+	int order;
+}fill2Struct;
+
+/////////////////////////////////////////
 
 unsigned long get_Param_from_Packet(char *message, int pos){
 	int start=0, end=0;

@@ -12,8 +12,7 @@
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <sys/msg.h> // message queue
-
-//#include <unistd.h>
+#include <unistd.h>
 
 #include "IP_Port.h"
 #include "COMEX_lib.h"
@@ -383,7 +382,7 @@ ib_setup_common(struct rdma_cb *cb,struct ibv_comp_channel *cc,struct ibv_cq *cq
 	cb->rdma_buf_len = BUF_LEN;
 	int shmid;
 	//if ((shmid = shmget(SHMKEY, BUF_LEN, 0666 | IPC_CREAT)) < 0) {
-	if(COMEX_Area==NULL){
+	if(COMEX_Area == NULL){
 		if ((shmid = shmget(SHMKEY, BUF_LEN, 0666 )) < 0) {
 				perror("shmget");
 				exit(1);
@@ -394,7 +393,7 @@ ib_setup_common(struct rdma_cb *cb,struct ibv_comp_channel *cc,struct ibv_cq *cq
 		}
 		COMEX_Area = cb->rdma_buffer;
 		#ifdef VERBOSE
-			printf("COMEX AREA is null, registered at%p\n",cb->rdma_buffer);
+			printf("COMEX AREA is null, registered at %p\n", cb->rdma_buffer);
 		#endif
 	}else{
 		#ifdef VERBOSE
@@ -865,8 +864,7 @@ int init_mq_receiver(){
     }
 }
 
-int
-do_server(struct rdma_cb *cb[0],int cbcount) {
+int do_server(struct rdma_cb *cb[0],int cbcount) {
 	struct rdma_conn_param conn_params[2];
 	int err,i;
 	int retqpno,retimm;
@@ -906,8 +904,8 @@ do_server(struct rdma_cb *cb[0],int cbcount) {
 /////////////////////////////////////////////////////////////////////////////////
 // define what to do here.
 
-     while(work>0){
-        int retval,retqpno;
+	while(work>0){
+		int retval,retqpno;
         err=do_completion(cb[0],&retval,&retqpno); // receive whatever
         if (err) {
                 return -1;
@@ -1212,6 +1210,7 @@ struct rdma_cb **  startRDMA_Server(int totalNodes, int nodeID, unsigned long to
 	myinstanceNo = nodeID;
 	BUF_LEN = totalMem;
 	COMEX_Area = COMEXAREA;
+	
 	cb_pointers = (struct rdma_cb **)malloc(sizeof(struct rdma_cb *)*totalNodes);
 	for(i=0; i<totalNodes; i++){
 		cb_pointers[i] = (struct rdma_cb *)malloc(sizeof(struct rdma_cb));
@@ -1233,7 +1232,7 @@ out:
 	return cb_pointers;
 }
 
-struct rdma_cb ** startRDMA_Client(int totalNodes, int nodeID, unsigned long totalMem) {
+struct rdma_cb ** startRDMA_Client(int totalNodes, int nodeID, unsigned long totalMem, char **ShAddr) {
 	struct rdma_cb **cb_pointers;
 	int i;
 
@@ -1252,6 +1251,7 @@ struct rdma_cb ** startRDMA_Client(int totalNodes, int nodeID, unsigned long tot
 	}
 
 	allinit(cb_pointers, totalNodes, PORTOFFSET);
+	*ShAddr = COMEX_Area;
 	fprintf(stdout, "startRDMA_Client OK\n");
 	return cb_pointers;
 }

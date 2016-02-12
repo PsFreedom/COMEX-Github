@@ -22,9 +22,9 @@ struct msghdr msg;
 
 struct sigaction sig;
 
+char *myMessage;
 char *COMEX_Area;
-char *COMEX_Write_Buffer;
-char *COMEX_Read_Buffer;
+char *COMEX_Comm_Buffer;
 
 void receiveData(int n, siginfo_t *info, void *unused) {
 	int cmd_number = info->si_int;
@@ -38,7 +38,7 @@ void init_SignalHandler(){
 }
 
 void sendNLMssge(char* myMessage){
-	strcpy(NLMSG_DATA(nlh), myMessage);	//	This is Massg !!!	
+//	strncpy(NLMSG_DATA(nlh), myMessage, MAX_PAYLOAD);	//	This is Massg !!!	
 	iov.iov_base = (void *)nlh;
 	iov.iov_len = nlh->nlmsg_len;
 	msg.msg_name = (void *)&dest_addr;
@@ -78,19 +78,21 @@ int init_Netlink(){
 }
 
 void recv_request(int Requester, int Order){
-	char myMessage[200];
 	
-	sprintf(myMessage, "1100 %d %d", Requester, Order);
+	myMessage[0] = 1;
+	
+//	sprintf(myMessage, "1100 %d %d", Requester, Order);
 //	printf("recv_request: %s\n", myMessage);
-	sendNLMssge(myMessage);
+//	sendNLMssge(myMessage);
 }
 
 void fill_COMEX_freelist(int remoteID, unsigned long offset, int order){
-	char myMessage[200];
 	
-	sprintf(myMessage, "1200 %d %lu %d", remoteID, offset, order);
+	myMessage[0] = 2;
+	
+//	sprintf(myMessage, "1200 %d %lu %d", remoteID, offset, order);
 //	printf("%s\n", myMessage);
-	sendNLMssge(myMessage);
+//	sendNLMssge(myMessage);
 }
 
 int main(int argc, char *argv[])
@@ -98,8 +100,8 @@ int main(int argc, char *argv[])
 	int shmid, totalCB, nodeID;
 	struct rdma_cb **cb_pointers;
 	unsigned long N_Pages, totalChar, i, j; //, Checksum=0;
-	unsigned long totalCOMEX, totalWriteBuffer, totalReadBuffer, totalMem;
-	char myMessage[200];
+	unsigned long totalCOMEX, totalWriteBuffer, totalReadBuffer, totalCommBuffer, totalMem;
+	initStruct *myInitStruct;
 	key_t key = 5683;
 	
 	N_Pages = strtol(argv[1], NULL, 10);	// Number of Pages as input.
@@ -112,9 +114,10 @@ int main(int argc, char *argv[])
 	printf("N_Pages %lu \n", N_Pages);
 	
 	totalCOMEX = sizeof(char)*totalChar;
-	totalWriteBuffer = sizeof(char)*4096*MAX_BUFFER;
-	totalReadBuffer = sizeof(char)*4096*MAX_BUFFER;
-	totalMem = totalCOMEX + totalWriteBuffer + totalReadBuffer;
+	totalWriteBuffer = totalReadBuffer = sizeof(char)*4096*MAX_BUFFER;
+	totalCommBuffer = sizeof(char)*COMM_BUFFER;
+	
+	totalMem = totalCOMEX + totalWriteBuffer + totalReadBuffer + totalCommBuffer;
 	printf("totalMem: %lu\n", totalMem);
 	
 	if ((shmid = shmget(key, totalMem, IPC_CREAT | 0666)) < 0) {
@@ -125,40 +128,36 @@ int main(int argc, char *argv[])
         perror("shmat");
         exit(1);
     }
-	
-	for(i=0, j=0; i < totalChar + (4096*MAX_BUFFER) + (4096*MAX_BUFFER); i+=4096, j++){
+//	COMEX_Area = (char *)malloc(sizeof(char)*totalMem);
+	for(i=0, j=0; i < totalChar + (4096*MAX_BUFFER) + (4096*MAX_BUFFER) + COMM_BUFFER; i+=4096, j++){
 		COMEX_Area[i] = j;
 	}
 	memset(COMEX_Area, 0, totalMem);
-	COMEX_Write_Buffer = COMEX_Area + totalChar;
-	COMEX_Read_Buffer = COMEX_Area + totalChar + 4096*MAX_BUFFER;
-	
+		
 	init_Netlink();
 	init_SignalHandler();
-	sprintf(myMessage, "%d %d %d %lu %lu %lu %lu %d", 0, nodeID, totalCB, COMEX_Area, &COMEX_Area[(N_Pages-1)*4096], COMEX_Write_Buffer, COMEX_Read_Buffer, MAX_BUFFER);
-	printf("%s\n", myMessage);
-	sendNLMssge(myMessage);
 
+	myMessage = NLMSG_DATA(nlh);
+	myMessage[0] = 0;
+	myInitStruct = (initStruct *)&myMessage[1];
+	myInitStruct->NodeID = nodeID;
+	myInitStruct->N_Nodes = totalCB;
+	myInitStruct->COMEX_Address = COMEX_Area;
+	myInitStruct->COMEX_Address_End = &COMEX_Area[(N_Pages-1)*4096];
+	myInitStruct->Write_Buffer_Address = COMEX_Area + totalChar;
+	myInitStruct->Read_Buffer_Address = COMEX_Area + totalChar + 4096*MAX_BUFFER;
+	myInitStruct->MaxBuffer = MAX_BUFFER;
+	myInitStruct->Comm_Buffer_Address = COMEX_Area + totalChar + 4096*MAX_BUFFER + 4096*MAX_BUFFER;
+	
+	printf("\ntotalChar + 4096*MAX_BUFFER + 4096*MAX_BUFFER  = %lu\n", totalChar + 4096*MAX_BUFFER + 4096*MAX_BUFFER);
+	myCommStruct = (CommStruct *)myInitStruct->Comm_Buffer_Address;
+	myCommStruct->NodeID = nodeID;
+	myCommStruct->totalCB = totalCB;
+	printf("NodeID %d totalCB %d\n", myCommStruct->NodeID, myCommStruct->totalCB);
+	
+	sendNLMssge(myMessage);
 	cb_pointers = startRDMA_Server(totalCB, nodeID, totalMem, COMEX_Area);
 	close(sock_fd);
+	
 	return 0;
 }
-
-
-
-
-
-
-
-
-
-
-
-//	while(1){
-//		Checksum = 0;
-//		for(i=0; i < totalInt+(1024*MAX_BUFFER); i++){
-//			Checksum = Checksum + COMEX_Area[i];
-//		}
-//		printf("Checksum = %ld \n", Checksum);
-//		sleep(60);
-//	}

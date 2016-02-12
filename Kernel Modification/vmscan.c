@@ -705,6 +705,7 @@ struct nlmsghdr *nlh;
 
 unsigned int totalLookUPEntry = 0;
 unsigned long COMEX_start_addr;
+unsigned long COMEX_Comm_addr;
 unsigned long *comexLookUP;
 
 static spinlock_t COMEX_Buddy_lock;
@@ -747,6 +748,7 @@ int COMEX_MAX_Buffer = 0;
 
 unsigned long COMEX_Write_buffer_addr;
 unsigned long COMEX_Read_buffer_addr;
+
 unsigned long Head_R_offset;
 unsigned long Prev_R_offset = 0;
 unsigned long RDMA_jiffies = 0;
@@ -1232,11 +1234,9 @@ unsigned long COMEX_rmqueue_smallest(unsigned int order){
 
 unsigned long COMEX_get_from_Buddy(int order){
 	unsigned long pageNO = 0;
-	unsigned long flags;
 	
-	local_irq_save(flags);
-	spin_lock_irqsave(&COMEX_Buddy_lock, flags);
-	
+	spin_unlock_wait(&COMEX_Buddy_lock);
+	spin_lock(&COMEX_Buddy_lock);
 	pageNO = COMEX_rmqueue_smallest(order);
 	spin_unlock(&COMEX_Buddy_lock);
 	
@@ -1248,10 +1248,9 @@ unsigned long COMEX_get_from_Buddy(int order){
 }
 
 void COMEX_free_to_Buddy(unsigned long pageNO, unsigned int order){
-	unsigned long flags;
 	
-	local_irq_save(flags);
-	spin_lock_irqsave(&COMEX_Buddy_lock, flags);
+	spin_unlock_wait(&COMEX_Buddy_lock);
+	spin_lock(&COMEX_Buddy_lock);
 	COMEX_free_one_page(pageNO, order);
 	spin_unlock(&COMEX_Buddy_lock);
 	
@@ -1260,11 +1259,11 @@ void COMEX_free_to_Buddy(unsigned long pageNO, unsigned int order){
 
 void COMEX_free_to_Buddy_Addr(unsigned long Addr, unsigned int order){
 
-	unsigned long pageNO, flags;
+	unsigned long pageNO;
 	pageNO = (Addr - COMEX_start_addr)/X86PageSize;
 
-	local_irq_save(flags);
-	spin_lock_irqsave(&COMEX_Buddy_lock, flags);
+	spin_unlock_wait(&COMEX_Buddy_lock);
+	spin_lock(&COMEX_Buddy_lock);
 	COMEX_free_one_page(pageNO, order);
 	spin_unlock(&COMEX_Buddy_lock);
 	
@@ -1377,14 +1376,15 @@ int init_NetLink(void){
     return 1;
 }
 
-void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, unsigned long endAddr, unsigned long Write_Buffer_Addr, unsigned long Read_Buffer_Addr, int MaxBuffer){
+void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, unsigned long endAddr, 
+					unsigned long Write_Buffer_Addr, unsigned long Read_Buffer_Addr, int MaxBuffer, unsigned long Comm_Buffer){
 
 	unsigned long *allPhyAddr, tmpStartAddr;
-	unsigned int *allPageNO;
+	unsigned int *allPageNO, userInt, Test;
 	unsigned int pageNO, nPages, i, j;	
 	unsigned int n_conPages, currentOrder, availPages, entry;
 	
-	struct page *COMEXpageDesc;
+	struct page *COMEXpageDesc, *prevPageDesc = NULL;
 	
 	pgd_t *COMEX_pgd;
 	pud_t *COMEX_pud;
@@ -1404,11 +1404,13 @@ void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, u
 	COMEX_Write_buffer_addr = Write_Buffer_Addr;
 	COMEX_Read_buffer_addr = Read_Buffer_Addr;
 	COMEX_MAX_Buffer = MaxBuffer;
+	COMEX_Comm_addr = Comm_Buffer;
 	
 	printk(KERN_INFO "%s: COMEX_Ready %d COMEX_PID %d \n", __FUNCTION__, COMEX_Ready, COMEX_PID);
 	printk(KERN_INFO "%s: NodeID %d N_Nodes %d \n", __FUNCTION__, COMEX_Node_ID, COMEX_Total_Nodes);
 	printk(KERN_INFO "%s: Start address %lu End Address %lu \n", __FUNCTION__, COMEX_start_addr, endAddr);
 	printk(KERN_INFO "%s: W_Buffer %lu R_Buffer %lu Total Buffer %d \n", __FUNCTION__, COMEX_Write_buffer_addr, COMEX_Read_buffer_addr, MaxBuffer);
+	printk(KERN_INFO "%s: Comm_Buffer %lu \n", __FUNCTION__, COMEX_Comm_addr);
 	
 	tmpStartAddr = startAddr;
 	nPages = ((endAddr-startAddr) / X86PageSize) +1;
@@ -1537,7 +1539,8 @@ void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, u
 	init_NetLink();
 	
 	Daemon_Ready = 1;
-//	COMEX_signal(-1);	// Finish Init signal
+	COMEX_Ready = 1;
+	COMEX_signal(-1);	// Finish Init signal
 }
 EXPORT_SYMBOL(COMEX_init_ENV);
 
@@ -1648,7 +1651,7 @@ int COMEX_move_to_COMEX(struct page *old_page){
 	unlock_page(new_page);	
 	unlock_page(old_page);
 	
-//	printk(KERN_INFO "%s: Moved to Local COMEX\n", __FUNCTION__);
+	printk(KERN_INFO "%s: Moved to Local COMEX\n", __FUNCTION__);
 	return 1;	//*** Important ***//
 }
 
@@ -1836,10 +1839,10 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			if (!(sc->gfp_mask & __GFP_IO))
 				goto keep_locked;
 			if(COMEX_Ready == 1){
-//				if(COMEX_move_to_COMEX(page) == 1){
-//					goto COMEX_Out;
-//				}
-				down_interruptible(&COMEX_Remote_MUTEX);
+				if(COMEX_move_to_COMEX(page) == 1){
+					goto COMEX_Out;
+				}
+/*				down_interruptible(&COMEX_Remote_MUTEX);
 				if(COMEX_move_to_Remote(page, &NodeID, &RemoteOffset) != -1){
 					up(&COMEX_Remote_MUTEX);
 					try_to_unmap_COMEX(page, ttu_flags, NodeID, RemoteOffset);
@@ -1850,12 +1853,13 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 					atomic_set(&page->_count,0);
 					goto free_it;
 				}
-				up(&COMEX_Remote_MUTEX);
+				up(&COMEX_Remote_MUTEX);	*/
 			}
 			if (!add_to_swap(page, page_list))
 				goto activate_locked;
 			may_enter_fs = 1;
 		}
+COMEX_Out:
 		mapping = page_mapping(page);
 
 		/*

@@ -71,9 +71,10 @@ void sendRDMA_nodeID(int NodeID, int imm){
 
 int main(int argc, char *argv[])
 {
+	char *SharedMem_Addr;
 	unsigned long totalMem;
 	int totalCB, nodeID, i;
-	int cmdNo, target, Order, oriOrder;
+	int cmdNo, target, Order, oriOrder, *TestPointer;
 	unsigned int Size;
 	unsigned long Offset, bufferOffset;
 	
@@ -81,17 +82,19 @@ int main(int argc, char *argv[])
 	totalCB = atoi(argv[2]);
 	nodeID = atoi(argv[3]);
 	
-	cb_pointers = startRDMA_Client(totalCB, nodeID, totalMem);	
+	cb_pointers = startRDMA_Client(totalCB, nodeID, totalMem, &SharedMem_Addr);	
+	printf("totalMem - COMM_BUFFER = %lu\n", totalMem - COMM_BUFFER);
+	SharedMem_Addr = SharedMem_Addr + totalMem - COMM_BUFFER;
+	myCommStruct = (CommStruct *)SharedMem_Addr;
+	printf("NodeID %d totalCB %d\n", myCommStruct->NodeID, myCommStruct->totalCB);
+	
 	for(i=0; i<totalCB; i++){
 		sprintf(RDMAmsg,"Hello msg from node %d", nodeID); sendRDMA_CB_number(i, 2000);
 	}
 	
 	init_NetLink();
-//	recvmsg(sock_fd, &msg, 0);		
-//	printf("   Received message payload: %s\n", NLMSG_DATA(nlh));
-    while(1){
+	while(1){
 		recvmsg(sock_fd, &msg, 0);
-//		printf("   %s: %s\n", __FUNCTION__, NLMSG_DATA(nlh));
 		cmdNo = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 0);
 		switch(cmdNo){
 			case 1100:	// Request for pages
@@ -139,6 +142,7 @@ int main(int argc, char *argv[])
 				break;
 		}
     }
-    close(sock_fd);		
+    close(sock_fd);
+
 	return 0;
 }
