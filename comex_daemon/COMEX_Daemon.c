@@ -3,6 +3,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <signal.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <linux/netlink.h>
 #include <unistd.h>
@@ -26,18 +27,27 @@ char *myMessage;
 char *COMEX_Area;
 char *COMEX_Comm_Buffer;
 
-void receiveData(int n, siginfo_t *info, void *unused) {
+void receiveData(int n, siginfo_t *info, void *unused)
+{
+	unsigned long *comexFS_address = NULL;
 	int cmd_number = info->si_int;
+	int configfd;
 	
 	printf("received value %i\n", cmd_number);
+	if(cmd_number == -1){	//Initialization
+		printf("Finish Initialization !\n");
+	}
 }
-void init_SignalHandler(){
+
+void init_SignalHandler()
+{
 	sig.sa_sigaction = receiveData;
 	sig.sa_flags = SA_SIGINFO;
 	sigaction(44, &sig, NULL);
 }
 
-void sendNLMssge(char* myMessage){
+void sendNLMssge(char* myMessage)
+{
 //	strncpy(NLMSG_DATA(nlh), myMessage, MAX_PAYLOAD);	//	This is Massg !!!	
 	iov.iov_base = (void *)nlh;
 	iov.iov_len = nlh->nlmsg_len;
@@ -128,14 +138,13 @@ int main(int argc, char *argv[])
         perror("shmat");
         exit(1);
     }
-//	COMEX_Area = (char *)malloc(sizeof(char)*totalMem);
 	for(i=0, j=0; i < totalChar + (4096*MAX_BUFFER) + (4096*MAX_BUFFER) + COMM_BUFFER; i+=4096, j++){
 		COMEX_Area[i] = j;
 	}
 	memset(COMEX_Area, 0, totalMem);
-		
-	init_Netlink();
+	
 	init_SignalHandler();
+	init_Netlink();
 
 	myMessage = NLMSG_DATA(nlh);
 	myMessage[0] = 0;

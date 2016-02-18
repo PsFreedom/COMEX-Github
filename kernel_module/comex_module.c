@@ -20,6 +20,7 @@ static struct netlink_kernel_cfg cfg = {0};
 typedef struct{
 	int	NodeID;
 	int	N_Nodes;
+	int	fileDesc;
 	unsigned long COMEX_Address;
 	unsigned long COMEX_Address_End;
 	unsigned long Write_Buffer_Address;
@@ -70,7 +71,8 @@ static void nl_recv_msg(struct sk_buff *skb)
 							myInit->Write_Buffer_Address, 
 							myInit->Read_Buffer_Address,
 							myInit->MaxBuffer,
-							myInit->Comm_Buffer_Address);
+							myInit->Comm_Buffer_Address,
+							myInit->fileDesc);
 			break;
 			
 		case 127:			
@@ -95,6 +97,7 @@ static void nl_recv_msg(struct sk_buff *skb)
 static int __init init_main(void)
 {	
 	printk(KERN_INFO "COMEX Kernel module V.0.1\n");
+	COMEX_init_FS();
 	cfg.input = nl_recv_msg;
 //	nl_sk = netlink_kernel_create(&init_net, NETLINK_COMEX, 0, nl_recv_msg, NULL, THIS_MODULE);
 	nl_sk = netlink_kernel_create(&init_net, NETLINK_COMEX, &cfg);

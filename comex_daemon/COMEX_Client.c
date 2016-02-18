@@ -20,6 +20,36 @@ struct msghdr msg;
 struct rdma_cb **cb_pointers;
 char RDMAmsg[64];
 
+void receiveData(int n, siginfo_t *info, void *unused)
+{
+	unsigned long *comexFS_address = NULL;
+	int cmd_number = info->si_int;
+	int configfd;
+	
+	printf("received value %i\n", cmd_number);
+	
+	if(cmd_number >=0 && cmd_number < MAX_BUFFER){	//RDMA Write
+		configfd = open("/sys/kernel/debug/comex_dir/comex_fs", O_RDWR);
+		if(configfd < 0) {
+			perror("open");
+			return -1;
+		}
+		comexFS_address = (unsigned long *)mmap(NULL, PAGE_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, configfd, 0);
+		if (comexFS_address == MAP_FAILED) {
+			perror("mmap");
+			return -1;
+		}	
+		printf("initial message: %lu\n", *comexFS_address);
+		close(configfd);
+	}
+}
+
+void init_SignalHandler(){
+	sig.sa_sigaction = receiveData;
+	sig.sa_flags = SA_SIGINFO;
+	sigaction(44, &sig, NULL);
+}
+
 int init_NetLink(){
 
 	sock_fd = socket(PF_NETLINK, SOCK_RAW, NETLINK_COMEX_KERNEL);
@@ -92,55 +122,11 @@ int main(int argc, char *argv[])
 		sprintf(RDMAmsg,"Hello msg from node %d", nodeID); sendRDMA_CB_number(i, 2000);
 	}
 	
+	init_SignalHandler();
 	init_NetLink();
 	while(1){
 		recvmsg(sock_fd, &msg, 0);
-		cmdNo = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 0);
-		switch(cmdNo){
-			case 1100:	// Request for pages
-				printf("   %s: %s\n", __FUNCTION__, NLMSG_DATA(nlh));
-				
-				target = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 1);
-				Order = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 2);
-				
-				sprintf(RDMAmsg,"1100 %d %d", nodeID, Order); sendRDMA_CB_number(target, 1000);
-				break;
-			case 1101:	// Reply with pages
-				printf("   %s: %s\n", __FUNCTION__, NLMSG_DATA(nlh));
-				
-				target = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 1);
-				Offset = get_Param_from_Packet(NLMSG_DATA(nlh), 2);
-				Order = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 3);
-				oriOrder = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 4);
-				
-				if(Offset == 200){		// MAX unsigned long (-1)
-					printf("	not enough pages");
-				}
-				else{
-					sprintf(RDMAmsg,"1200 %d %lu %d", nodeID, Offset, Order); sendRDMA_nodeID(target, 1000);
-				}
-				break;
-			case 2100:	// Write page to remote node
-				printf("   %s: %s\n", __FUNCTION__, NLMSG_DATA(nlh));
-				
-				bufferOffset = get_Param_from_Packet(NLMSG_DATA(nlh), 1);
-				target = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 2);
-				Offset = get_Param_from_Packet(NLMSG_DATA(nlh), 3);
-				Size = (int)get_Param_from_Packet(NLMSG_DATA(nlh), 4);
-				
-				do_write(cb_pointers[target], bufferOffset, Offset, Size*4096);
-//				sprintf(RDMAmsg,"9100 %lu", Offset); sendRDMA_CB_number(target, 1000);
-				break;
-			case 3000:
-				printf("   %s: %s\n", __FUNCTION__, NLMSG_DATA(nlh));
-				
-//				strcpy(NLMSG_DATA(nlh), "Test Sem");
-//				sendmsg(sock_fd, &msg, 0);
-				break;
-			default:
-				printf(">>> default: %s\n", NLMSG_DATA(nlh));
-				break;
-		}
+		printf("   %s: NetLink from Kernel \"%s\"\n", __FUNCTION__, NLMSG_DATA(nlh));
     }
     close(sock_fd);
 

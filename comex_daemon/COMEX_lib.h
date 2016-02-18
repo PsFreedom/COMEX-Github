@@ -1,3 +1,4 @@
+#define PAGE_SIZE 4096
 #define MAX_BUFFER 64
 #define COMM_BUFFER 16384
 
@@ -15,6 +16,7 @@ char *COMEX_Area = NULL;
 typedef struct{
 	int	NodeID;
 	int	N_Nodes;
+	int	fileDesc;
 	unsigned long COMEX_Address;
 	unsigned long COMEX_Address_End;
 	unsigned long Write_Buffer_Address;

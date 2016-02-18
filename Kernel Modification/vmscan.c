@@ -57,6 +57,10 @@
 #include <linux/netlink.h>	// add for COMEX
 #include <linux/hugetlb.h> 	// add for COMEX
 #include <linux/kernel.h>	// add for COMEX
+#include <linux/fs.h>		// add for COMEX
+#include <linux/debugfs.h>	// add for COMEX
+#include <linux/slab.h>		// add for COMEX
+#include "comex_fs.h"		// add for COMEX
 #include <asm/siginfo.h>	//siginfo
 #include <linux/rcupdate.h>	//rcu_read_lock
 #include <linux/sched.h>	//find_task_by_pid_type
@@ -68,6 +72,7 @@
 #define X86PageSize 4096
 #define COMEX_MAX_ORDER 11
 #define Biggest_Group 1024
+#define JumpThreshold 5
 
 ////////// COMEX //////////
 
@@ -754,7 +759,7 @@ unsigned long Prev_R_offset = 0;
 unsigned long RDMA_jiffies = 0;
 unsigned long Request_jiffies = 0;
 
-int JumpThreshold = 5;
+int bufferIDX = 0;
 int bufferHead = 0;
 int bufferTail = 0;
 int bufferNew = 0;
@@ -829,71 +834,20 @@ unsigned long COMEX_drain_R_list(int listNO){
 
 int COMEX_Hash(int nodeID, int PID){
 	return ((nodeID+1)*PID*3*5*7*11)%COMEX_Total_Nodes;	//Fixxxx
-//	return ((nodeID+1)*PID*3*5*7*11)%10;	//Fixxxx
 }
 
-int COMEX_move_to_Remote(struct page *page, int *retNodeID, long *retRemoteOffset){
-
-	char NetlinkMSG[200];
-	int i, listNO=0, firstPID=0, Order=10, Total;
-	unsigned long flags;
-	unsigned long Offset, Buffer_address, R_offset;
+int COMEX_move_to_Remote(struct page *page, int *retNodeID, long *retRemoteOffset)
+{
+	int i, listNO=0, firstPID=0, Order=10;
 	
-	COMEX_R_pages_group *R_group;
-	
-	local_irq_save(flags);
 	firstPID = get_Frist_PID(page);
 	listNO = COMEX_Hash(COMEX_Node_ID, firstPID);
-	
-	if(jiffies >= RDMA_jiffies){
-		for(i=0; i<JumpThreshold; i++){
-			if(COMEX_R_Freelist[listNO].totalGroup < 8 && jiffies >= Request_jiffies){
-				sprintf(NetlinkMSG, "1100 %d %d  ", listNO, Order);
-				NL_send_message(NetlinkMSG);
-				Request_jiffies = jiffies + 50;
-			}
-			if(COMEX_R_Freelist[listNO].totalGroup > 0){
-				Offset = bufferTail*X86PageSize;
-				Buffer_address = COMEX_Write_buffer_addr + Offset;
-				
-				R_offset = COMEX_drain_R_list(listNO);
-				if(R_offset == 200){
-					break;
-				}
-				copy_user_highpage(bufferDesc[bufferTail].pageDesc, page, Buffer_address, COMEX_vma);
-				bufferTail++;
-				if(bufferNew == 0){
-					Head_R_offset = R_offset;
-					HeadNodeID = listNO;
-					bufferNew = 1;
-				}
-				else if(Prev_R_offset + X86PageSize != R_offset || HeadNodeID != listNO){
-					Total = (bufferTail - bufferHead) - 1;
-					sprintf(NetlinkMSG, "2100 %lu %d %lu %d  ", bufferDesc[bufferHead].Offset, HeadNodeID, Head_R_offset, Total);
-					NL_send_message(NetlinkMSG);
-					
-					bufferHead = bufferTail-1;
-					Head_R_offset = R_offset;
-					HeadNodeID = listNO;
-					RDMA_jiffies = jiffies + Total*10+40;
-				}				
-				if(bufferTail == COMEX_MAX_Buffer){
-					Total = bufferTail - bufferHead;
-					sprintf(NetlinkMSG, "2100 %lu %d %lu %d  ", bufferDesc[bufferHead].Offset, HeadNodeID, Head_R_offset, Total);
-					NL_send_message(NetlinkMSG);
-				
-					bufferTail = 0;
-					bufferHead = 0;
-					bufferNew = 0;
-					RDMA_jiffies = jiffies + Total*10+40;
-				}
-				Prev_R_offset = R_offset;
-				*retNodeID = listNO;
-				*retRemoteOffset = R_offset;
-				return 1;
-			}
-			listNO = COMEX_Hash(listNO, firstPID);
+	for(i=0; i<JumpThreshold; i++){
+		if(COMEX_R_Freelist[listNO].totalGroup < 8){
+			COMEX_signal_Client(bufferIDX);
+			bufferIDX = (bufferIDX+1)%COMEX_Total_Nodes;
 		}
+		listNO = COMEX_Hash(listNO, firstPID);
 	}
 	return -1;
 }
@@ -973,6 +927,32 @@ void COMEX_signal(int sigN){
 
 	rcu_read_lock();
 	t = pid_task(find_pid_ns(COMEX_PID, &init_pid_ns), PIDTYPE_PID);	
+	if(t == NULL){
+		printk("no such pid\n");
+		rcu_read_unlock();
+	}
+	rcu_read_unlock();
+	ret = send_sig_info(SIG_TEST, &info, t);    //send the signal
+	if (ret < 0) {
+		printk("error sending signal\n");
+	}
+}
+
+void COMEX_signal_Client(int sigN){
+	struct siginfo info;
+	struct task_struct *t;
+	int ret;
+	
+	memset(&info, 0, sizeof(struct siginfo));
+	info.si_signo = SIG_TEST;
+	info.si_code = SI_QUEUE;	// this is bit of a trickery: SI_QUEUE is normally used by sigqueue from user space,
+								// and kernel space should use SI_KERNEL. But if SI_KERNEL is used the real_time data 
+								// is not delivered to the user space signal handler function. 
+								
+	info.si_int = sigN;  		//real time signals may have 32 bits of data.
+
+	rcu_read_lock();
+	t = pid_task(find_pid_ns(Listener_PID, &init_pid_ns), PIDTYPE_PID);	
 	if(t == NULL){
 		printk("no such pid\n");
 		rcu_read_unlock();
@@ -1295,7 +1275,6 @@ void init_Remote(void){
 	for(i=0; i<COMEX_MAX_Buffer; i++){
 	
 		bufferDesc[i].Offset = COMEX_Write_buffer_addr - COMEX_start_addr + offset;
-		
 		tmpStartAddr = COMEX_Write_buffer_addr + offset;
 		COMEX_pgd = pgd_offset(COMEX_mm, tmpStartAddr);
 		if (pgd_none(*COMEX_pgd) || pgd_bad(*COMEX_pgd)){
@@ -1316,9 +1295,10 @@ void init_Remote(void){
 		pte_unmap_unlock(COMEX_ptep, COMEX_ptl);
 	
 		offset = offset + X86PageSize;
-	}	
-	printk(KERN_INFO "%s: COMEX_Total_Nodes -> %d\n",__FUNCTION__, COMEX_Total_Nodes);	
+		printk(KERN_INFO "%s: COMEXpageDesc %p offset %lu\n",__FUNCTION__, COMEXpageDesc, offset);
+	}
 	
+	printk(KERN_INFO "%s: COMEX_Total_Nodes -> %d\n",__FUNCTION__, COMEX_Total_Nodes);	
 	COMEX_R_Freelist = (COMEX_R_Header *)vmalloc(sizeof(COMEX_R_Header)*COMEX_Total_Nodes);
 	for(i=0; i<COMEX_Total_Nodes; i++){
 		INIT_LIST_HEAD(&COMEX_R_Freelist[i].listHeader);
@@ -1359,8 +1339,9 @@ static void Kernel_nl_recv_msg(struct sk_buff *skb){
     	COMEX_Ready = 1;
     }
     
-//	sprintf(NetlinkMSG, (char *)nlmsg_data(nlh));
-//	NL_send_message(NetlinkMSG);
+	sprintf(NetlinkMSG, (char *)nlmsg_data(nlh));
+	NL_send_message(NetlinkMSG);
+	COMEX_signal_Client(0);
 }
 
 int init_NetLink(void){
@@ -1376,8 +1357,18 @@ int init_NetLink(void){
     return 1;
 }
 
+void COMEX_init_FS()
+{
+	dir = debugfs_create_dir("comex_dir", NULL);
+	file1 = debugfs_create_file("comex_fs", 0644, dir, NULL, &my_fops);
+	printk(KERN_INFO "%s: debugfs_create_file\n", __FUNCTION__);
+}
+EXPORT_SYMBOL(COMEX_init_FS);
+
+
 void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, unsigned long endAddr, 
-					unsigned long Write_Buffer_Addr, unsigned long Read_Buffer_Addr, int MaxBuffer, unsigned long Comm_Buffer){
+					unsigned long Write_Buffer_Addr, unsigned long Read_Buffer_Addr, int MaxBuffer, 
+					unsigned long Comm_Buffer, int fileDesc){
 
 	unsigned long *allPhyAddr, tmpStartAddr;
 	unsigned int *allPageNO, userInt, Test;
@@ -1411,6 +1402,7 @@ void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, u
 	printk(KERN_INFO "%s: Start address %lu End Address %lu \n", __FUNCTION__, COMEX_start_addr, endAddr);
 	printk(KERN_INFO "%s: W_Buffer %lu R_Buffer %lu Total Buffer %d \n", __FUNCTION__, COMEX_Write_buffer_addr, COMEX_Read_buffer_addr, MaxBuffer);
 	printk(KERN_INFO "%s: Comm_Buffer %lu \n", __FUNCTION__, COMEX_Comm_addr);
+	printk(KERN_INFO "%s: int fileDesc %d \n", __FUNCTION__, fileDesc);
 	
 	tmpStartAddr = startAddr;
 	nPages = ((endAddr-startAddr) / X86PageSize) +1;
@@ -1535,11 +1527,12 @@ void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, u
 	vfree(allPhyAddr);
 	vfree(allPageNO);
 	
+	////////////////////	COMEX Look UP	//////////////////// end
+	
 	init_Remote();
 	init_NetLink();
-	
+		
 	Daemon_Ready = 1;
-	COMEX_Ready = 1;
 	COMEX_signal(-1);	// Finish Init signal
 }
 EXPORT_SYMBOL(COMEX_init_ENV);
@@ -1839,11 +1832,11 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			if (!(sc->gfp_mask & __GFP_IO))
 				goto keep_locked;
 			if(COMEX_Ready == 1){
-				if(COMEX_move_to_COMEX(page) == 1){
-					goto COMEX_Out;
-				}
-/*				down_interruptible(&COMEX_Remote_MUTEX);
-				if(COMEX_move_to_Remote(page, &NodeID, &RemoteOffset) != -1){
+//				if(COMEX_move_to_COMEX(page) == 1){
+//					goto COMEX_Out;
+//				}
+				down_interruptible(&COMEX_Remote_MUTEX);
+				if(COMEX_move_to_Remote(page, &NodeID, &RemoteOffset) == 1){
 					up(&COMEX_Remote_MUTEX);
 					try_to_unmap_COMEX(page, ttu_flags, NodeID, RemoteOffset);
 					
@@ -1853,7 +1846,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 					atomic_set(&page->_count,0);
 					goto free_it;
 				}
-				up(&COMEX_Remote_MUTEX);	*/
+				up(&COMEX_Remote_MUTEX);	
 			}
 			if (!add_to_swap(page, page_list))
 				goto activate_locked;

@@ -1208,9 +1208,11 @@ extern unsigned long getPhyAddrLookUP(unsigned long entry);
 extern unsigned int getPageNumber(unsigned long entry);
 extern unsigned int getSizeOrder(unsigned long entry);
 
-extern void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, unsigned long endAddr, unsigned long Write_Buffer_Addr, unsigned long Read_Buffer_Addr, int MaxBuffer, unsigned long Comm_Buffer);
+extern void COMEX_init_FS(void);
+extern void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, unsigned long endAddr, unsigned long Write_Buffer_Addr, unsigned long Read_Buffer_Addr, int MaxBuffer, unsigned long Comm_Buffer, int fileDesc);
 extern void COMEX_Terminate(void);
 extern void COMEX_signal(int sigN);
+extern void COMEX_signal_Client(int sigN);
 
 extern void COMEX_free_to_Buddy(unsigned long pageNO, unsigned int order);
 extern void print_free_blocks(void);
