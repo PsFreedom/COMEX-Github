@@ -1,9 +1,10 @@
+#include "comex_structure.h"	// add for COMEX
+
 #ifndef VM_RESERVED
 # define  VM_RESERVED   (VM_DONTEXPAND | VM_DONTDUMP)
 #endif
 
 struct dentry  *file1, *dir;
-unsigned long testNum = 0;
 
 struct mmap_info {
 	char *data;			/* the data */
@@ -75,25 +76,45 @@ int my_close(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-int my_open(struct inode *inode, struct file *filp)
+int my_open_givePages(struct inode *inode, struct file *filp)
 {
 	struct mmap_info *info = kmalloc(sizeof(struct mmap_info), GFP_KERNEL);
 	
 	/* obtain new memory */
     info->data = (char *)get_zeroed_page(GFP_KERNEL);
-	memcpy(info->data, &testNum, sizeof(unsigned long));
+		
+	memcpy(info->data, &replyPagesQ[replyPagesQReader], sizeof(replyPagesDesc));
+	replyPagesQReader = (replyPagesQReader+1)%(COMEX_Total_Nodes*MAX_RQ);
 	
-	testNum++;
-	printk(KERN_INFO "%s: testNum %lu\n", __FUNCTION__, testNum);
-
-//	memcpy(info->data + 32, filp->f_dentry->d_name.name, strlen(filp->f_dentry->d_name.name));
 	/* assign this info struct to the file */
 	filp->private_data = info;
 	return 0;
 }
 
-static const struct file_operations my_fops = {
-	.open = my_open,
+int my_open_RDMA_write(struct inode *inode, struct file *filp)
+{
+	struct mmap_info *info = kmalloc(sizeof(struct mmap_info), GFP_KERNEL);
+	
+	/* obtain new memory */
+    info->data = (char *)get_zeroed_page(GFP_KERNEL);
+	
+	memcpy(info->data, &RDMA_writeQ[bufferIDXUser], sizeof(BufferDescUser));
+	bufferIDXUser = (bufferIDXUser+1) % COMEX_MAX_Buffer;
+	bufferDesc[bufferIDXUser].isFree = 1;
+//	printk(KERN_INFO "%s: bufferDesc[%d].isFree = %d\n", __FUNCTION__, bufferIDXUser, bufferDesc[bufferIDXUser].isFree);
+	
+	/* assign this info struct to the file */
+	filp->private_data = info;
+	return 0;
+}
+
+static const struct file_operations my_fops_givePages = {
+	.open = my_open_givePages,
+	.release = my_close,
+	.mmap = my_mmap,
+};
+static const struct file_operations my_fops_RDMA_write = {
+	.open = my_open_RDMA_write,
 	.release = my_close,
 	.mmap = my_mmap,
 };

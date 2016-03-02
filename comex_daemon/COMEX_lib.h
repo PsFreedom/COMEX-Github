@@ -1,5 +1,5 @@
 #define PAGE_SIZE 4096
-#define MAX_BUFFER 64
+#define MAX_BUFFER 256
 #define COMM_BUFFER 16384
 
 typedef struct{
@@ -25,38 +25,23 @@ typedef struct{
 	unsigned long Comm_Buffer_Address;
 }initStruct;
 
-typedef struct{
-	int Requester;
-	int Order;
-}request1Struct;
+typedef struct{		//	Size8
+	int target;		//	4
+	int order;		//	4
+}requestPageStruct;
 
-typedef struct{
-	int remoteID;
-	unsigned long offset;
-	int order;
-}fill2Struct;
+typedef struct replyPagesQueue{		//	Size28
+	int target, order, oriOrder;	//	4+4+4
+	unsigned long offsetAddr;		//	8
+} replyPagesDesc;
+
+typedef struct Remote_buffer_descriptor{	//For user
+	int nodeID, buffIDX;
+	unsigned long l_Offset;
+	unsigned long r_Offset;
+} BufferDescUser;
 
 /////////////////////////////////////////
-
-unsigned long get_Param_from_Packet(char *message, int pos){
-	int start=0, end=0;
-	char msgBuff[200];
-
-	strcpy(msgBuff, message);
-	while(pos > 0){
-		if(msgBuff[start] == ' '){
-			pos--;
-		}
-		start++;
-	}
-	end = start+1;
-	while(msgBuff[end] != ' ' && msgBuff[end] != '\0'){
-		end++;
-	}
-	end--;
-	
-	return strtoul(&msgBuff[start], &msgBuff[end], 10);
-}
 
 void checkSumPage(unsigned long startOffset){
 	unsigned long i, checkSum=0;
@@ -96,43 +81,8 @@ void checkSumAll(){
 
 #ifdef IS_SERVER
 void recv_request(int Requester, int Order);
-void COMEX_server_cmd(char *message){
+void fill_COMEX_freelist(int remoteID, unsigned long offset, int order);
 
-	int cmdNo, from, order;
-	unsigned long offset;
-	
-//	printf("   %s: %s\n", __FUNCTION__, message);
-	cmdNo = (int)get_Param_from_Packet(message, 0);
-	switch(cmdNo){
-		case 1100:	// Get request
-			from = (int)get_Param_from_Packet(message, 1);
-			order = (int)get_Param_from_Packet(message, 2);			
-			
-			recv_request(from ,order);
-			break;
-		case 1200:	// Recieve pages
-			from = (int)get_Param_from_Packet(message, 1);
-			offset = get_Param_from_Packet(message, 2);
-			order = (int)get_Param_from_Packet(message, 3);			
-			
-			from = id2cbNum(from);
-			fill_COMEX_freelist(from, offset, order);
-			break;
-		case 9000:	// Debug checksum all area
-			printf("   Debug: This is debug message\n", cmdNo, message);
-			checkSumArea();
-			break;
-		case 9100:	// Debug checksum page
-			offset = (int)get_Param_from_Packet(message, 1);
-		
-			printf("   Debug: This is debug message\n", cmdNo, message);
-			checkSumPage(offset);
-			break;
-		default:
-			printf("   default: %d - %s\n", cmdNo, message);
-			break;
-	}
-}
 void COMEX_server_msg(char *message){
 	printf("%s: %s\n", __FUNCTION__, message);
 }

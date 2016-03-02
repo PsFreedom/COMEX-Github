@@ -9,7 +9,7 @@
 #include <unistd.h>
 
 #define IS_SERVER 1
-#include "RDMA_COMEX_both_BETA2.h"
+#include "COMEX_RDMA_both_BETA2.h"
 
 #define LISTEN_PORT		7795
 #define NETLINK_COMEX	28
@@ -46,7 +46,7 @@ void init_SignalHandler()
 	sigaction(44, &sig, NULL);
 }
 
-void sendNLMssge(char* myMessage)
+void sendNLMssge()
 {
 //	strncpy(NLMSG_DATA(nlh), myMessage, MAX_PAYLOAD);	//	This is Massg !!!	
 	iov.iov_base = (void *)nlh;
@@ -87,22 +87,31 @@ int init_Netlink(){
 	return 1;
 }
 
-void recv_request(int Requester, int Order){
+void recv_request(int Requester, int Order)
+{	
+	requestPageStruct *myStruct;
 	
-	myMessage[0] = 1;
-	
-//	sprintf(myMessage, "1100 %d %d", Requester, Order);
-//	printf("recv_request: %s\n", myMessage);
-//	sendNLMssge(myMessage);
+	myMessage = (char *)NLMSG_DATA(nlh);
+	myMessage[0] = 11;
+	myStruct = (requestPageStruct *)&NLMSG_DATA(nlh)[1];
+	myStruct->target = Requester;
+	myStruct->order = Order;
+//	printf("%s: Requester %d Order %d \n", __FUNCTION__, Requester, Order);
+	sendNLMssge();
 }
 
-void fill_COMEX_freelist(int remoteID, unsigned long offset, int order){
+void fill_COMEX_freelist(int remoteID, unsigned long offset, int order)
+{
+	replyPagesDesc *myStruct;
 	
-	myMessage[0] = 2;
-	
-//	sprintf(myMessage, "1200 %d %lu %d", remoteID, offset, order);
-//	printf("%s\n", myMessage);
-//	sendNLMssge(myMessage);
+	myMessage = (char *)NLMSG_DATA(nlh);
+	myMessage[0] = 12;
+	myStruct = (requestPageStruct *)&NLMSG_DATA(nlh)[1];
+	myStruct->target = id2cbNum(remoteID);
+	myStruct->order = order;
+	myStruct->offsetAddr = offset;
+	printf("%s: id2cbNum %d offset %lu order %d \n", __FUNCTION__, id2cbNum(remoteID), offset, order);
+	sendNLMssge();
 }
 
 int main(int argc, char *argv[])
@@ -146,17 +155,17 @@ int main(int argc, char *argv[])
 	init_SignalHandler();
 	init_Netlink();
 
-	myMessage = NLMSG_DATA(nlh);
+	myMessage = (char *)NLMSG_DATA(nlh);
 	myMessage[0] = 0;
 	myInitStruct = (initStruct *)&myMessage[1];
 	myInitStruct->NodeID = nodeID;
 	myInitStruct->N_Nodes = totalCB;
-	myInitStruct->COMEX_Address = COMEX_Area;
-	myInitStruct->COMEX_Address_End = &COMEX_Area[(N_Pages-1)*4096];
-	myInitStruct->Write_Buffer_Address = COMEX_Area + totalChar;
-	myInitStruct->Read_Buffer_Address = COMEX_Area + totalChar + 4096*MAX_BUFFER;
+	myInitStruct->COMEX_Address = (unsigned long)COMEX_Area;
+	myInitStruct->COMEX_Address_End = (unsigned long)&COMEX_Area[(N_Pages-1)*4096];
+	myInitStruct->Write_Buffer_Address = (unsigned long)COMEX_Area + totalChar;
+	myInitStruct->Read_Buffer_Address = (unsigned long)COMEX_Area + totalChar + 4096*MAX_BUFFER;
 	myInitStruct->MaxBuffer = MAX_BUFFER;
-	myInitStruct->Comm_Buffer_Address = COMEX_Area + totalChar + 4096*MAX_BUFFER + 4096*MAX_BUFFER;
+	myInitStruct->Comm_Buffer_Address = (unsigned long)COMEX_Area + totalChar + 4096*MAX_BUFFER + 4096*MAX_BUFFER;
 	
 	printf("\ntotalChar + 4096*MAX_BUFFER + 4096*MAX_BUFFER  = %lu\n", totalChar + 4096*MAX_BUFFER + 4096*MAX_BUFFER);
 	myCommStruct = (CommStruct *)myInitStruct->Comm_Buffer_Address;
@@ -164,7 +173,7 @@ int main(int argc, char *argv[])
 	myCommStruct->totalCB = totalCB;
 	printf("NodeID %d totalCB %d\n", myCommStruct->NodeID, myCommStruct->totalCB);
 	
-	sendNLMssge(myMessage);
+	sendNLMssge();
 	cb_pointers = startRDMA_Server(totalCB, nodeID, totalMem, COMEX_Area);
 	close(sock_fd);
 	

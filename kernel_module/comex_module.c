@@ -29,37 +29,37 @@ typedef struct{
 	unsigned long Comm_Buffer_Address;
 }initStruct;
 
-typedef struct{
-	int Requester;
-	int Order;
-}request1Struct;
+typedef struct{		//	Size8
+	int target;		//	4
+	int order;		//	4
+}requestPageStruct;
 
-typedef struct{
-	int remoteID;
-	unsigned long offset;
-	int order;
-}fill2Struct;
+typedef struct replyPagesQueue{		//	Size20
+	int target, order, oriOrder;	//	4+4+4
+	unsigned long offsetAddr;		//	8
+} replyPagesDesc;
+
 /////////////////////////////////////////
 
 static void nl_recv_msg(struct sk_buff *skb)
 {
-	char *msgPointer;
 	initStruct *myInit;
-	char cmdNumber;
-	unsigned long RemoteID, Offset, nPages;		// for case 100:
-	unsigned long requester, Order;	// for case 1100:
+	requestPageStruct *myStruct11;
+	replyPagesDesc *myStruct12;
 	
+	char *msgPointer;
+	char cmdNumber;	
 	struct nlmsghdr *nlh = (struct nlmsghdr *)skb->data;
-	msgPointer = (char *)nlmsg_data(nlh);
 	
+	msgPointer = (char *)nlmsg_data(nlh);	
 	cmdNumber = msgPointer[0];
-	printk(KERN_INFO "%s: cmdNumber %u\n", __FUNCTION__, cmdNumber);
+//	printk(KERN_INFO "%s: cmdNumber %u\n", __FUNCTION__, cmdNumber);
 	switch(cmdNumber){
 		case 0:
 			myInit = (initStruct *)(msgPointer+1);
 			COMEX_PID = nlh->nlmsg_pid; 	/*pid of sending process, COMEX */
 			
-			printk(KERN_INFO "%s: NodeID %lu N_Nodes %lu \n", __FUNCTION__, myInit->NodeID, myInit->N_Nodes);
+			printk(KERN_INFO "%s: NodeID %d N_Nodes %d \n", __FUNCTION__, myInit->NodeID, myInit->N_Nodes);
 			printk(KERN_INFO "%s: COMEX_Adress %lu COMEX_End %lu \n", __FUNCTION__, myInit->COMEX_Address, myInit->COMEX_Address_End);
 			printk(KERN_INFO "%s: Write_Buffer %lu Read_Buffer %lu MaxBuffer %lu \n", __FUNCTION__, myInit->Write_Buffer_Address, myInit->Read_Buffer_Address, myInit->MaxBuffer);
 			printk(KERN_INFO "%s: Comm_Buffer %lu \n", __FUNCTION__, myInit->Comm_Buffer_Address);
@@ -75,18 +75,20 @@ static void nl_recv_msg(struct sk_buff *skb)
 							myInit->fileDesc);
 			break;
 			
-		case 127:			
-			printk(KERN_INFO "%s: Test Message 127 !!!\n", __FUNCTION__);
-			break;
-		case 1100:			
-//			printk(KERN_INFO "%s: requester %lu Order %lu\n", __FUNCTION__, requester, Order);
-//			COMEX_recv_asked((int)requester, (int)Order);
+		case 11:
+			myStruct11 = (requestPageStruct *)(msgPointer+1);
+//			printk(KERN_INFO "%s: requester %d Order %d\n", __FUNCTION__, myStruct11->target, myStruct11->order);
+			COMEX_recv_asked(myStruct11->target, myStruct11->order);
 			break;
 			
-		case 1200:			
-//			printk(KERN_INFO "%s: RemoteID %lu \n", __FUNCTION__, RemoteID);
-//			printk(KERN_INFO "%s: Offset %lu nPages %lu\n", __FUNCTION__, Offset, nPages);
-//			COMEX_recv_fill((int)RemoteID, Offset, (int)nPages);
+		case 12:
+			myStruct12 = (replyPagesDesc *)(msgPointer+1);
+//			printk(KERN_INFO "%s: Source %d Offset %lu Order %d\n", __FUNCTION__, myStruct12->target, myStruct12->offsetAddr, myStruct12->order);
+			COMEX_recv_fill(myStruct12->target, myStruct12->offsetAddr, myStruct12->order);
+			break;
+			
+		case 127:			
+			printk(KERN_INFO "%s: Test Message 127 !!!\n", __FUNCTION__);
 			break;
 			
 		default:

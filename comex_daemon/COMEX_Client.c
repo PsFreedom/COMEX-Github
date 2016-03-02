@@ -1,9 +1,12 @@
-#include "RDMA_COMEX_both_BETA2.h"
+#include "COMEX_RDMA_both_BETA2.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <linux/netlink.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 
 #include <unistd.h>
 
@@ -11,35 +14,97 @@
 #define MAX_PAYLOAD 200 /* maximum payload size*/
 #define NORMAL_MSG 5
 
+int totalCB, nodeID;
+
 int sock_fd;
 struct sockaddr_nl src_addr, dest_addr;
 struct nlmsghdr *nlh = NULL;
 struct iovec iov;
 struct msghdr msg;
 
+struct sigaction sig;
+
 struct rdma_cb **cb_pointers;
-char RDMAmsg[64];
+//char RDMAmsg[64];
+
+void sendRDMA_CB_number(int NodeID, char *RDMAmsg, int imm)
+{
+//	strcpy((cb_pointers[NodeID]->send_buffer).piggy, RDMAmsg);
+	memcpy((cb_pointers[NodeID]->send_buffer).piggy, RDMAmsg, 64);
+	do_sendout(cb_pointers[NodeID], imm);
+}
+
+void sendRDMA_nodeID(int NodeID, char *RDMAmsg, int imm)
+{
+	struct rdma_cb *cb_pointer;
+	cb_pointer = id2cb(NodeID);
+
+//	strcpy((cb_pointer->send_buffer).piggy, RDMAmsg);
+	memcpy((cb_pointer->send_buffer).piggy, RDMAmsg, 64);
+	do_sendout(cb_pointer, imm);
+}
 
 void receiveData(int n, siginfo_t *info, void *unused)
 {
-	unsigned long *comexFS_address = NULL;
 	int cmd_number = info->si_int;
 	int configfd;
 	
-	printf("received value %i\n", cmd_number);
-	
-	if(cmd_number >=0 && cmd_number < MAX_BUFFER){	//RDMA Write
-		configfd = open("/sys/kernel/debug/comex_dir/comex_fs", O_RDWR);
+	if(cmd_number >= 0 && cmd_number < MAX_BUFFER){	//RDMA Write
+		printf("received value %i\n", cmd_number);
+	}
+	else if(cmd_number >= 10000 && cmd_number < 10000+totalCB){
+		int ask_target = cmd_number - 10000;
+		requestPageStruct RDMAmsg;		
+		
+		RDMAmsg.target = nodeID;
+		RDMAmsg.order = 10;
+		
+		printf("Ask node %d order %d\n", ask_target, RDMAmsg.order);
+		sendRDMA_CB_number(ask_target, (char *)&RDMAmsg, 1001);
+	}
+	else if(cmd_number == 11000){
+		int reply_target;
+		replyPagesDesc *comexFS_givePages = NULL;
+		
+		configfd = open("/sys/kernel/debug/comex_dir/comex_givePages", O_RDWR);
 		if(configfd < 0) {
 			perror("open");
-			return -1;
+			return;
 		}
-		comexFS_address = (unsigned long *)mmap(NULL, PAGE_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, configfd, 0);
-		if (comexFS_address == MAP_FAILED) {
+		comexFS_givePages = (replyPagesDesc *)mmap(NULL, PAGE_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, configfd, 0);
+		if (comexFS_givePages == MAP_FAILED) {
 			perror("mmap");
-			return -1;
+			return;
 		}	
-		printf("initial message: %lu\n", *comexFS_address);
+		
+		reply_target = comexFS_givePages->target;
+		comexFS_givePages->target = nodeID;
+		printf("To %d: offsetAddr %lu order %d\n", reply_target, comexFS_givePages->offsetAddr, comexFS_givePages->order);
+		sendRDMA_nodeID(reply_target, (char *)comexFS_givePages, 1002);
+		
+		munmap(comexFS_givePages, PAGE_SIZE);
+		close(configfd);
+	}
+	else if(cmd_number == 11001){
+		printf("No available page\n");
+	}
+	else if(cmd_number == 12000){
+//		printf("received value %i\n", cmd_number);
+		BufferDescUser *myBufferDescUser;
+	
+		configfd = open("/sys/kernel/debug/comex_dir/comex_RDMA_write", O_RDWR);
+		if(configfd < 0) {
+			perror("open");
+			return;
+		}
+		myBufferDescUser = (BufferDescUser *)mmap(NULL, PAGE_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, configfd, 0);
+		if (myBufferDescUser == MAP_FAILED) {
+			perror("mmap");
+			return;
+		}
+		
+		printf("To %d IDX %d R %lu\n", myBufferDescUser->nodeID, myBufferDescUser->buffIDX, myBufferDescUser->r_Offset);
+		munmap(myBufferDescUser, PAGE_SIZE);
 		close(configfd);
 	}
 }
@@ -85,28 +150,11 @@ int init_NetLink(){
     sendmsg(sock_fd, &msg, 0);
 }
 
-void sendRDMA_CB_number(int NodeID, int imm){
-	strcpy((cb_pointers[NodeID]->send_buffer).piggy, RDMAmsg);
-	do_sendout(cb_pointers[NodeID], imm);
-}
-
-void sendRDMA_nodeID(int NodeID, int imm){
-	struct rdma_cb *cb_pointer;
-	
-	cb_pointer = id2cb(NodeID);
-
-	strcpy((cb_pointer->send_buffer).piggy, RDMAmsg);
-	do_sendout(cb_pointer, imm);
-}
-
 int main(int argc, char *argv[])
 {
-	char *SharedMem_Addr;
+	char *SharedMem_Addr, RDMAmsg[64];
 	unsigned long totalMem;
-	int totalCB, nodeID, i;
-	int cmdNo, target, Order, oriOrder, *TestPointer;
-	unsigned int Size;
-	unsigned long Offset, bufferOffset;
+	int i;
 	
 	totalMem = strtol(argv[1], NULL, 10);
 	totalCB = atoi(argv[2]);
@@ -119,14 +167,17 @@ int main(int argc, char *argv[])
 	printf("NodeID %d totalCB %d\n", myCommStruct->NodeID, myCommStruct->totalCB);
 	
 	for(i=0; i<totalCB; i++){
-		sprintf(RDMAmsg,"Hello msg from node %d", nodeID); sendRDMA_CB_number(i, 2000);
+//		sprintf(RDMAmsg,"Hello msg from node %d", nodeID); sendRDMA_CB_number(i, 2000);
+		sprintf(RDMAmsg,"Hello msg from node %d", nodeID);
+		sendRDMA_CB_number(i, RDMAmsg, 2000);
 	}
 	
 	init_SignalHandler();
 	init_NetLink();
 	while(1){
 		recvmsg(sock_fd, &msg, 0);
-		printf("   %s: NetLink from Kernel \"%s\"\n", __FUNCTION__, NLMSG_DATA(nlh));
+//		printf("   %s: NetLink from Kernel \"%s\"\n", __FUNCTION__, NLMSG_DATA(nlh));
+//		sprintf(NLMSG_DATA(nlh), "");
     }
     close(sock_fd);
 

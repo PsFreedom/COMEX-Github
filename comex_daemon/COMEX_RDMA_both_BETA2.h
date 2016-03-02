@@ -916,8 +916,17 @@ int do_server(struct rdma_cb *cb[0],int cbcount) {
             case 2000:
 				COMEX_server_msg(qp2cb(retqpno)->recv_buffer.piggy);
 				break;
-            case 1000:
-				COMEX_server_cmd(qp2cb(retqpno)->recv_buffer.piggy);
+//            case 1000:
+//				COMEX_server_cmd(qp2cb(retqpno)->recv_buffer.piggy);
+//				break;
+            case 1001:
+				recv_request(	((requestPageStruct *)qp2cb(retqpno)->recv_buffer.piggy)->target,
+								((requestPageStruct *)qp2cb(retqpno)->recv_buffer.piggy)->order);
+				break;
+            case 1002:
+				fill_COMEX_freelist(((replyPagesDesc *)qp2cb(retqpno)->recv_buffer.piggy)->target, 
+									((replyPagesDesc *)qp2cb(retqpno)->recv_buffer.piggy)->offsetAddr,
+									((replyPagesDesc *)qp2cb(retqpno)->recv_buffer.piggy)->order);
 				break;
 #endif
             case 5:
