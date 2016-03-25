@@ -1198,7 +1198,31 @@ static inline void sync_mm_rss(struct mm_struct *mm)
 }
 #endif
 
+typedef struct pageFaultDescriptor{
+	struct list_head link;
+	int nodeID;
+	unsigned long R_offset;
+	unsigned long L_offset;
+} PF_Desc;
+
+typedef struct COMEX_buffer_descriptor{
+	int isFree;
+	struct page *pageDesc;
+	unsigned long Offset;
+} COMEXbuffer;
+extern int *bufferIDX_ReadBack;
+extern COMEXbuffer **bufferDesc_ReadBack;
+
+extern PF_Desc *comex_PF_Desc;
+extern struct list_head *PF_head;
+extern int PF_headIDX;
+
+extern int COMEX_Node_ID;
+extern int COMEX_Total_Nodes;
+extern int COMEX_MAX_Buffer;
+
 extern struct semaphore COMEX_ReadBack_MUTEX;
+extern struct semaphore COMEX_ReadBack_FlowLock;
 
 extern unsigned int COMEX_Ready;
 extern unsigned long *comexLookUP;

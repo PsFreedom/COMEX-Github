@@ -559,18 +559,20 @@ int do_send(struct rdma_cb *cb, enum ibv_wr_opcode opcode,unsigned long ouroffse
 	send_wr.sg_list = &send_sge;
 
 	if (opcode == IBV_WR_RDMA_READ) {
+//		printf("fall in read");
 		send_sge.addr = (uint64_t)cb->rdma_buffer+ouroffset;
 		send_sge.length = immdOrsize;
 		send_sge.lkey = cb->rdma_mr->lkey;
-
 		send_wr.wr.rdma.remote_addr = cb->remote_buffer.addr+remoteoffset;
 		send_wr.wr.rdma.rkey = cb->remote_buffer.rkey;
 	}else if (opcode == IBV_WR_RDMA_WRITE) {
+//		printf("fall in write\n");
         send_sge.addr = (uint64_t)cb->rdma_buffer+ouroffset;
 		send_sge.length = immdOrsize; //
 		send_sge.lkey = cb->rdma_mr->lkey;
         send_wr.wr.rdma.remote_addr = cb->remote_buffer.addr+remoteoffset;
         send_wr.wr.rdma.rkey = cb->remote_buffer.rkey;
+		
 	}else if (opcode == IBV_WR_RDMA_WRITE_WITH_IMM) {
         send_sge.addr = (uint64_t)cb->rdma_buffer+ouroffset;
 		send_sge.length = 1; // should fix it
@@ -758,7 +760,20 @@ int server_getConnect(struct rdma_cb *cb ,struct rdma_conn_param *conn_params,st
 
 	return 0;
 }
-int do_asyncread(struct rdma_cb *cb ,int ouroffset,int remoteoffset,int SEND_SIZE){
+int do_read(struct rdma_cb *cb ,unsigned long ouroffset,unsigned long remoteoffset,unsigned int SEND_SIZE){
+	int err;
+	int retqpno;
+	int retimm;
+	
+	do_asyncread(cb,ouroffset,remoteoffset,SEND_SIZE);
+	err = do_completion(cb,&retimm,&retqpno);
+	if (err) {
+		printf("error in write withimm completion");
+			return 1;
+	}
+	return 0;
+}
+int do_asyncread(struct rdma_cb *cb ,unsigned long ouroffset,unsigned long remoteoffset,unsigned int SEND_SIZE){
 int err;
 
 #ifdef VERBOSE
@@ -772,9 +787,9 @@ int err;
 }
 
 int do_write_imm(struct rdma_cb *cb,int immediate){
-int err;
-int retqpno;
-int retimm;
+	int err;
+	int retqpno;
+	int retimm;
 #ifdef VERBOSE
         fprintf(stdout, "Issuing an RDMA Write with immediate to the server\n");
 #endif
@@ -903,7 +918,7 @@ int do_server(struct rdma_cb *cb[0],int cbcount) {
 ////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////
 // define what to do here.
-
+	unsigned long Addr;
 	while(work>0){
 		int retval,retqpno;
         err=do_completion(cb[0],&retval,&retqpno); // receive whatever
@@ -927,6 +942,11 @@ int do_server(struct rdma_cb *cb[0],int cbcount) {
 				fill_COMEX_freelist(((replyPagesDesc *)qp2cb(retqpno)->recv_buffer.piggy)->target, 
 									((replyPagesDesc *)qp2cb(retqpno)->recv_buffer.piggy)->offsetAddr,
 									((replyPagesDesc *)qp2cb(retqpno)->recv_buffer.piggy)->order);
+				break;
+            case 9001:
+				Addr = *((unsigned long *)qp2cb(retqpno)->recv_buffer.piggy);
+				printf("Offset %lu\n", Addr);
+				checkSumPage(Addr + COMEX_Area);
 				break;
 #endif
             case 5:
@@ -1225,7 +1245,7 @@ struct rdma_cb **  startRDMA_Server(int totalNodes, int nodeID, unsigned long to
 		cb_pointers[i] = (struct rdma_cb *)malloc(sizeof(struct rdma_cb));
 		if(!cb_pointers[i]){
 			fprintf(stderr, "Could not allocate memory for the control block\n");
-			return -1;
+			return NULL;
 		}
 		memset(cb_pointers[i], 0, sizeof(struct rdma_cb));
 		cb_pointers[i]->is_server = 1;
@@ -1254,7 +1274,7 @@ struct rdma_cb ** startRDMA_Client(int totalNodes, int nodeID, unsigned long tot
 		cb_pointers[i] = (struct rdma_cb *)malloc(sizeof(struct rdma_cb));
 		if(!cb_pointers[i]){
 			fprintf(stderr, "Could not allocate memory for the control block\n");
-			return -1;
+			return NULL;
 		}
 		memset(cb_pointers[i], 0, sizeof(struct rdma_cb));
 	}

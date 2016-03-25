@@ -54,6 +54,7 @@
 #include "comex_fs.h"		// add for COMEX
 #include "comex_buddy.h"	// add for COMEX
 #include "comex_lookUP.h"	// add for COMEX
+//#include "comex_pageFault.h"	// add for COMEX
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/vmscan.h>
@@ -705,8 +706,7 @@ int COMEX_Hash(int nodeID, int PID){
 
 int COMEX_move_to_Remote(struct page *page, int *retNodeID, long *retRemoteOffset)
 {
-	int i, listNO=0, firstPID=0, Order=10;
-	unsigned long R_addr;
+	int i, listNO=0, firstPID=0;
 	
 	firstPID = get_Frist_PID(page);
 	listNO = COMEX_Hash(COMEX_Node_ID, firstPID);
@@ -717,44 +717,45 @@ int COMEX_move_to_Remote(struct page *page, int *retNodeID, long *retRemoteOffse
 			COMEX_R_Freelist[listNO].RQcounter--;
 			COMEX_signal_Client(listNO + 10000);
 		}
-		if(COMEX_R_Freelist[listNO].totalGroup > 0 && bufferDesc[bufferIDX].isFree == 1)
-		{		
-			R_addr = COMEX_drain_R_list(listNO);
+		if(COMEX_R_Freelist[listNO].totalGroup > 0 && bufferDesc[listNO][bufferIDX[listNO]].isFree == 1)
+		{
+			*retNodeID = listNO;
+			*retRemoteOffset = COMEX_drain_R_list(listNO);
 			
-			bufferDesc[bufferIDX].isFree = 0;
-			RDMA_writeQ[bufferIDX].nodeID = listNO;
-			RDMA_writeQ[bufferIDX].buffIDX = bufferIDX;
-			RDMA_writeQ[bufferIDX].l_Offset = bufferDesc[bufferIDX].Offset;
-			RDMA_writeQ[bufferIDX].r_Offset = R_addr;			
+			bufferDesc[listNO][bufferIDX[listNO]].isFree = 0;
 			
-			COMEX_signal_Client(12000);
-			bufferIDX = (bufferIDX+1)%COMEX_MAX_Buffer;
+			INIT_LIST_HEAD(&RDMA_writeQ[RDMA_writeQ_IDX].link);
+			RDMA_writeQ[RDMA_writeQ_IDX].nodeID = listNO;
+			RDMA_writeQ[RDMA_writeQ_IDX].buffIDX = bufferIDX[listNO];
+			RDMA_writeQ[RDMA_writeQ_IDX].l_Offset = bufferDesc[listNO][bufferIDX[listNO]].Offset;
+			RDMA_writeQ[RDMA_writeQ_IDX].r_Offset = *retRemoteOffset;
+
+			list_add_tail(&RDMA_writeQ[RDMA_writeQ_IDX].link, &RDMA_qHead[listNO]);
+			copy_user_highpage(bufferDesc[listNO][bufferIDX[listNO]].pageDesc, page, COMEX_start_addr + bufferDesc[listNO][bufferIDX[listNO]].Offset, COMEX_vma);
+			
+//			if(RDMA_write_signal == 1){
+				COMEX_signal_Client(12000);
+//				RDMA_write_signal = 0;
+//			}
+			bufferIDX[listNO] = (bufferIDX[listNO]+1)%COMEX_MAX_Buffer;
+			RDMA_writeQ_IDX = (RDMA_writeQ_IDX+1)%(COMEX_MAX_Buffer*COMEX_Total_Nodes);
+			return 1;	// 1 for success
 		}
 		listNO = COMEX_Hash(listNO, firstPID);
 	}
-	return -1;
+	return -1;	// -1 for fail case
 }
 
 void COMEX_flush_to_Remote(){
 	char NetlinkMSG[200];
 	int Total;
-/*	if(bufferHead != bufferTail){
-		Total = bufferTail - bufferHead;
-		sprintf(NetlinkMSG, "2100 %lu %d %lu %d  ", bufferDesc[bufferHead].Offset, HeadNodeID, Head_R_offset, Total);
-		NL_send_message(NetlinkMSG);
-
-		bufferTail = 0;
-		bufferHead = 0;
-		bufferNew = 0;
-		RDMA_jiffies = jiffies + Total*10+40;
-	}*/
 }
 
 void COMEX_recv_fill(int RemoteID, unsigned long Offset, int order)
 {
 	int nPages = powOrder(order);
 	
-	down(&COMEX_Remote_MUTEX);
+	down_interruptible(&COMEX_Remote_MUTEX);
 	
 	COMEX_R_Freelist[RemoteID].RQcounter++;
 	COMEX_R_Freelist[RemoteID].totalGroup++;
@@ -793,9 +794,7 @@ void COMEX_recv_asked(int requester, int order)
 			replyPagesQ[replyPagesQCounter].oriOrder = oriOrder;
 			replyPagesQ[replyPagesQCounter].offsetAddr = Offset;
 			
-			printk(KERN_INFO "%s: target %d offsetAddr %lu order %d \n", __FUNCTION__	,replyPagesQ[replyPagesQCounter].target
-																						,replyPagesQ[replyPagesQCounter].offsetAddr
-																						,replyPagesQ[replyPagesQCounter].order);
+//			printk(KERN_INFO "%s: target %d offsetAddr %lu order %d \n", __FUNCTION__	,replyPagesQ[replyPagesQCounter].target, replyPagesQ[replyPagesQCounter].offsetAddr, replyPagesQ[replyPagesQCounter].order);
 			replyPagesQCounter = (replyPagesQCounter+1)%(COMEX_Total_Nodes*MAX_RQ);
 			COMEX_signal_Client(11000);
 		}
@@ -857,11 +856,10 @@ void COMEX_signal_Client(int sigN){
 	}
 }
 
-
 void init_Remote(void)
 {
-	int i;
-	unsigned long tmpStartAddr, offset=0;
+	int i,j;
+	unsigned long tmpStartAddr, offset = 0;
 	pgd_t *COMEX_pgd;
 	pud_t *COMEX_pud;
 	pmd_t *COMEX_pmd;
@@ -870,33 +868,79 @@ void init_Remote(void)
 	
 	struct page *COMEXpageDesc;
 
-	bufferDesc = (COMEXbuffer *)vmalloc(sizeof(COMEXbuffer)*COMEX_MAX_Buffer);
-	for(i=0; i<COMEX_MAX_Buffer; i++){
+	RDMA_qHead = (struct list_head *)vmalloc(sizeof(struct list_head)*COMEX_Total_Nodes);
+	RDMA_writeQ = (BufferDescUser *)vmalloc(sizeof(BufferDescUser)*COMEX_Total_Nodes*COMEX_MAX_Buffer);
 	
-		bufferDesc[i].isFree = 1;
-		bufferDesc[i].Offset = COMEX_Write_buffer_addr - COMEX_start_addr + offset;
-		tmpStartAddr = COMEX_Write_buffer_addr + offset;
+	bufferIDX = (int *)vmalloc(sizeof(int)*COMEX_Total_Nodes);
+	bufferDesc = (COMEXbuffer **)vmalloc(sizeof(COMEXbuffer *)*COMEX_Total_Nodes);
+	for(j=0; j<COMEX_Total_Nodes; j++)
+	{	
+		INIT_LIST_HEAD(&RDMA_qHead[j]);
+		bufferIDX[j] = 0;
+		bufferDesc[j] = (COMEXbuffer *)vmalloc(sizeof(COMEXbuffer)*COMEX_MAX_Buffer);
+		for(i=0; i<COMEX_MAX_Buffer; i++)
+		{
+			bufferDesc[j][i].isFree = 1;
+			bufferDesc[j][i].Offset = COMEX_Write_buffer_addr - COMEX_start_addr + offset;	// Offset from start !
+			tmpStartAddr = COMEX_Write_buffer_addr + offset;
+			
+			COMEX_pgd = pgd_offset(COMEX_mm, tmpStartAddr);
+			if (pgd_none(*COMEX_pgd) || pgd_bad(*COMEX_pgd)){
+				printk(KERN_INFO "%s: PGD bug\n", __FUNCTION__);
+			}
+			COMEX_pud = pud_offset(COMEX_pgd, tmpStartAddr);
+			if (pud_none(*COMEX_pud) || pud_bad(*COMEX_pud)){
+				printk(KERN_INFO "%s: PUD bug\n", __FUNCTION__);
+			}
+			COMEX_pmd = pmd_offset(COMEX_pud, tmpStartAddr);
+			if (pmd_none(*COMEX_pmd) || pmd_bad(*COMEX_pmd)){
+				printk(KERN_INFO "%s: PMD bug\n", __FUNCTION__);
+			}
+			COMEX_ptep = pte_offset_map_lock(COMEX_mm, COMEX_pmd, tmpStartAddr, &COMEX_ptl);
+			COMEX_pte = *COMEX_ptep;
+			COMEXpageDesc = pte_page(COMEX_pte);
+			bufferDesc[j][i].pageDesc = COMEXpageDesc;
+			pte_unmap_unlock(COMEX_ptep, COMEX_ptl);
 		
-		COMEX_pgd = pgd_offset(COMEX_mm, tmpStartAddr);
-		if (pgd_none(*COMEX_pgd) || pgd_bad(*COMEX_pgd)){
-			printk(KERN_INFO "%s: PGD bug\n", __FUNCTION__);
+			offset = offset + X86PageSize;
+			printk(KERN_INFO "%s: %d %d COMEXpageDesc %p offset %lu\n",__FUNCTION__, j, i, bufferDesc[j][i].pageDesc, bufferDesc[j][i].Offset);
 		}
-		COMEX_pud = pud_offset(COMEX_pgd, tmpStartAddr);
-		if (pud_none(*COMEX_pud) || pud_bad(*COMEX_pud)){
-			printk(KERN_INFO "%s: PUD bug\n", __FUNCTION__);
-		}
-		COMEX_pmd = pmd_offset(COMEX_pud, tmpStartAddr);
-		if (pmd_none(*COMEX_pmd) || pmd_bad(*COMEX_pmd)){
-			printk(KERN_INFO "%s: PMD bug\n", __FUNCTION__);
-		}
-		COMEX_ptep = pte_offset_map_lock(COMEX_mm, COMEX_pmd, tmpStartAddr, &COMEX_ptl);
-		COMEX_pte = *COMEX_ptep;
-		COMEXpageDesc = pte_page(COMEX_pte);
-		bufferDesc[i].pageDesc = COMEXpageDesc;
-		pte_unmap_unlock(COMEX_ptep, COMEX_ptl);
+	}
 	
-		offset = offset + X86PageSize;
-//		printk(KERN_INFO "%s: COMEXpageDesc %p offset %lu\n",__FUNCTION__, COMEXpageDesc, offset);
+	offset = 0;
+	bufferIDX_ReadBack = (int *)vmalloc(sizeof(int)*COMEX_Total_Nodes);
+	bufferDesc_ReadBack = (COMEXbuffer **)vmalloc(sizeof(COMEXbuffer *)*COMEX_Total_Nodes);
+	for(j=0; j<COMEX_Total_Nodes; j++)
+	{
+		bufferIDX_ReadBack[j] = 0;
+		bufferDesc_ReadBack[j] = (COMEXbuffer *)vmalloc(sizeof(COMEXbuffer)*COMEX_MAX_Buffer);
+		for(i=0; i<COMEX_MAX_Buffer; i++)
+		{
+			bufferDesc_ReadBack[j][i].isFree = 1;
+			bufferDesc_ReadBack[j][i].Offset = COMEX_Read_buffer_addr - COMEX_start_addr + offset;	// Offset from start !
+			
+			tmpStartAddr = COMEX_Read_buffer_addr + offset;
+			COMEX_pgd = pgd_offset(COMEX_mm, tmpStartAddr);
+			if (pgd_none(*COMEX_pgd) || pgd_bad(*COMEX_pgd)){
+				printk(KERN_INFO "%s: PGD bug\n", __FUNCTION__);
+			}
+			COMEX_pud = pud_offset(COMEX_pgd, tmpStartAddr);
+			if (pud_none(*COMEX_pud) || pud_bad(*COMEX_pud)){
+				printk(KERN_INFO "%s: PUD bug\n", __FUNCTION__);
+			}
+			COMEX_pmd = pmd_offset(COMEX_pud, tmpStartAddr);
+			if (pmd_none(*COMEX_pmd) || pmd_bad(*COMEX_pmd)){
+				printk(KERN_INFO "%s: PMD bug\n", __FUNCTION__);
+			}
+			COMEX_ptep = pte_offset_map_lock(COMEX_mm, COMEX_pmd, tmpStartAddr, &COMEX_ptl);
+			COMEX_pte = *COMEX_ptep;
+			COMEXpageDesc = pte_page(COMEX_pte);
+			bufferDesc_ReadBack[j][i].pageDesc = COMEXpageDesc;
+			pte_unmap_unlock(COMEX_ptep, COMEX_ptl);
+			
+			offset = offset + X86PageSize;
+			printk(KERN_INFO "%s: %d %d COMEXpageDesc %p offset %lu\n",__FUNCTION__, j, i, bufferDesc_ReadBack[j][i].pageDesc, bufferDesc_ReadBack[j][i].Offset);
+		}
 	}
 	
 	printk(KERN_INFO "%s: COMEX_Total_Nodes -> %d\n",__FUNCTION__, COMEX_Total_Nodes);
@@ -917,7 +961,11 @@ void init_Remote(void)
 		page_groupsIDX_Use[i] = 0;
 	}
 	
-	RDMA_writeQ = (BufferDescUser *)vmalloc(sizeof(BufferDescUser)*COMEX_MAX_Buffer);
+	PF_head = (struct list_head *)vmalloc(sizeof(struct list_head)*COMEX_Total_Nodes);
+	comex_PF_Desc = (PF_Desc *)vmalloc(sizeof(PF_Desc)*COMEX_Total_Nodes*COMEX_MAX_Buffer);
+	for(i=0; i<COMEX_Total_Nodes; i++){
+		INIT_LIST_HEAD(&PF_head[i]);
+	}	
 }
 
 void NL_send_message(char *NetlinkMSG){
@@ -977,7 +1025,8 @@ void COMEX_init_FS()
 {
 	dir = debugfs_create_dir("comex_dir", NULL);
 	file1 = debugfs_create_file("comex_givePages", 0644, dir, NULL, &my_fops_givePages);
-	file1 = debugfs_create_file("comex_RDMA_write", 0644, dir, NULL, &my_fops_RDMA_write);
+	file2 = debugfs_create_file("comex_RDMA_write", 0644, dir, NULL, &my_fops_RDMA_write);
+	file3 = debugfs_create_file("comex_pFault", 0644, dir, NULL, &my_fops_pageFault);
 
 	printk(KERN_INFO "%s: debugfs_create_file\n", __FUNCTION__);
 }
@@ -1028,10 +1077,12 @@ void COMEX_init_ENV(int PID, int NodeID, int N_Nodes, unsigned long startAddr, u
 	
 	sema_init(&COMEX_Remote_MUTEX, 1);
 	sema_init(&COMEX_ReadBack_MUTEX, 1);
+	sema_init(&COMEX_ReadBack_FlowLock, 1);
+
 	atomic_set(&ShrinkPL_counter, 0);
 	spin_lock_init(&COMEX_Buddy_lock);
-	spin_lock_init(&COMEX_Remote_lock);
 	
+	down_interruptible(&COMEX_ReadBack_FlowLock);
 	COMEX_Buddy_Zone = (COMEX_Zone *)vmalloc(sizeof(COMEX_Zone));
 	COMEX_Buddy_page = (COMEX_page *)vmalloc(sizeof(COMEX_page)*nPages);
 	
@@ -1453,11 +1504,11 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 //				if(COMEX_move_to_COMEX(page) == 1){
 //					goto COMEX_Out;
 //				}
-				down(&COMEX_Remote_MUTEX);
+				down_interruptible(&COMEX_Remote_MUTEX);
 				if(COMEX_move_to_Remote(page, &NodeID, &RemoteOffset) == 1){
 					up(&COMEX_Remote_MUTEX);
+
 					try_to_unmap_COMEX(page, ttu_flags, NodeID, RemoteOffset);
-					
 					page->mapping == NULL;
 					ClearPageDirty(page);
 					unlock_page(page);

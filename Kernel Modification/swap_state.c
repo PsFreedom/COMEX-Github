@@ -7,6 +7,7 @@
  *  Rewritten to use page cache, (C) 1998 Stephen Tweedie
  */
 #include <linux/mm.h>
+#include <linux/delay.h>	// For COMEX
 #include <linux/gfp.h>
 #include <linux/kernel_stat.h>
 #include <linux/swap.h>
@@ -303,7 +304,7 @@ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 			struct vm_area_struct *vma, unsigned long addr)
 {
 	struct page *found_page, *new_page = NULL;
-	int err, NodeID;
+	int err, NodeID, i;
 	unsigned long offsetField;
 	char NetlinkMSG[200];
 
@@ -377,13 +378,32 @@ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 				swap_readpage(new_page);
 			}
 			else{
+				down_interruptible(&COMEX_ReadBack_MUTEX);
+				
 				offsetField = (unsigned long)swp_offset(entry);
 				NodeID = (int)offsetField & 1023;
 				offsetField = offsetField >> 10;
+				
+				INIT_LIST_HEAD(&comex_PF_Desc[PF_headIDX].link);
+				comex_PF_Desc[PF_headIDX].nodeID = NodeID;
+//				comex_PF_Desc[PF_headIDX].buffIDX = bufferIDX_ReadBack[NodeID];
+				comex_PF_Desc[PF_headIDX].R_offset = offsetField;
+				comex_PF_Desc[PF_headIDX].L_offset = bufferDesc_ReadBack[NodeID][bufferIDX_ReadBack[NodeID]].Offset;
+				comex_PF_Desc[PF_headIDX].L_offset = bufferDesc_ReadBack[NodeID][0].Offset;
+				list_add_tail(&comex_PF_Desc[PF_headIDX].link, &PF_head[NodeID]);
+				
+				COMEX_signal_Client(13000);
+				down_interruptible(&COMEX_ReadBack_FlowLock);
+				
+				copy_user_highpage(new_page, bufferDesc_ReadBack[NodeID][0].pageDesc, NULL, NULL);
+				SetPageDirty(new_page);
+				SetPageUptodate(new_page);
+				unlock_page(new_page);
+				
+				PF_headIDX = (PF_headIDX+1)%(COMEX_Total_Nodes*COMEX_MAX_Buffer);
+				bufferIDX_ReadBack[NodeID] = (bufferIDX_ReadBack[NodeID]+1);
 
-				sprintf(NetlinkMSG, "3000 %d %lu ", NodeID, offsetField);
-//				sprintf(NetlinkMSG, "3000 Testttt ");
-				NL_send_message(NetlinkMSG);
+				up(&COMEX_ReadBack_MUTEX);
 			}
 			return new_page;
 		}

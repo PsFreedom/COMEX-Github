@@ -750,6 +750,8 @@ int free_swap_and_cache(swp_entry_t entry)
 
 	if (non_swap_entry(entry))
 		return 1;
+	if (swp_type(entry) == 8)
+		return 1;
 
 	p = swap_info_get(entry);
 	if (p) {

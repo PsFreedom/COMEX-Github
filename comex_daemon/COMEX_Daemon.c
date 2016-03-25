@@ -93,7 +93,7 @@ void recv_request(int Requester, int Order)
 	
 	myMessage = (char *)NLMSG_DATA(nlh);
 	myMessage[0] = 11;
-	myStruct = (requestPageStruct *)&NLMSG_DATA(nlh)[1];
+	myStruct = (requestPageStruct *)&(NLMSG_DATA(nlh)[1]);
 	myStruct->target = Requester;
 	myStruct->order = Order;
 //	printf("%s: Requester %d Order %d \n", __FUNCTION__, Requester, Order);
@@ -106,7 +106,7 @@ void fill_COMEX_freelist(int remoteID, unsigned long offset, int order)
 	
 	myMessage = (char *)NLMSG_DATA(nlh);
 	myMessage[0] = 12;
-	myStruct = (requestPageStruct *)&NLMSG_DATA(nlh)[1];
+	myStruct = (replyPagesDesc *)&(NLMSG_DATA(nlh)[1]);
 	myStruct->target = id2cbNum(remoteID);
 	myStruct->order = order;
 	myStruct->offsetAddr = offset;
@@ -116,7 +116,7 @@ void fill_COMEX_freelist(int remoteID, unsigned long offset, int order)
 
 int main(int argc, char *argv[])
 {
-	int shmid, totalCB, nodeID;
+	int shmid, nodeID;
 	struct rdma_cb **cb_pointers;
 	unsigned long N_Pages, totalChar, i, j; //, Checksum=0;
 	unsigned long totalCOMEX, totalWriteBuffer, totalReadBuffer, totalCommBuffer, totalMem;
@@ -164,13 +164,15 @@ int main(int argc, char *argv[])
 	myInitStruct->COMEX_Address_End = (unsigned long)&COMEX_Area[(N_Pages-1)*4096];
 	myInitStruct->Write_Buffer_Address = (unsigned long)COMEX_Area + totalChar;
 	myInitStruct->Read_Buffer_Address = (unsigned long)COMEX_Area + totalChar + 4096*MAX_BUFFER;
-	myInitStruct->MaxBuffer = MAX_BUFFER;
+	myInitStruct->MaxBuffer = MAX_BUFFER/totalCB;
 	myInitStruct->Comm_Buffer_Address = (unsigned long)COMEX_Area + totalChar + 4096*MAX_BUFFER + 4096*MAX_BUFFER;
 	
 	printf("\ntotalChar + 4096*MAX_BUFFER + 4096*MAX_BUFFER  = %lu\n", totalChar + 4096*MAX_BUFFER + 4096*MAX_BUFFER);
 	myCommStruct = (CommStruct *)myInitStruct->Comm_Buffer_Address;
 	myCommStruct->NodeID = nodeID;
 	myCommStruct->totalCB = totalCB;
+	myCommStruct->Write_Buffer_Offset = myInitStruct->Write_Buffer_Address - myInitStruct->COMEX_Address;
+	myCommStruct->Read_Buffer_Offset  = myInitStruct->Read_Buffer_Address - myInitStruct->COMEX_Address;
 	printf("NodeID %d totalCB %d\n", myCommStruct->NodeID, myCommStruct->totalCB);
 	
 	sendNLMssge();

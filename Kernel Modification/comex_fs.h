@@ -4,7 +4,7 @@
 # define  VM_RESERVED   (VM_DONTEXPAND | VM_DONTDUMP)
 #endif
 
-struct dentry  *file1, *dir;
+struct dentry  *file1, *file2, *file3, *dir;
 
 struct mmap_info {
 	char *data;			/* the data */
@@ -76,6 +76,19 @@ int my_close(struct inode *inode, struct file *filp)
 	return 0;
 }
 
+int my_close_pageFault(struct inode *inode, struct file *filp)
+{
+	struct mmap_info *info = filp->private_data;
+	
+	up(&COMEX_ReadBack_FlowLock);
+	
+	/* obtain new memory */
+	free_page((unsigned long)info->data);
+    kfree(info);
+	filp->private_data = NULL;
+	return 0;
+}
+
 int my_open_givePages(struct inode *inode, struct file *filp)
 {
 	struct mmap_info *info = kmalloc(sizeof(struct mmap_info), GFP_KERNEL);
@@ -95,13 +108,48 @@ int my_open_RDMA_write(struct inode *inode, struct file *filp)
 {
 	struct mmap_info *info = kmalloc(sizeof(struct mmap_info), GFP_KERNEL);
 	
+	int i;
+	BufferDescUser *myBufferDescUser;
+
 	/* obtain new memory */
     info->data = (char *)get_zeroed_page(GFP_KERNEL);
 	
-	memcpy(info->data, &RDMA_writeQ[bufferIDXUser], sizeof(BufferDescUser));
-	bufferIDXUser = (bufferIDXUser+1) % COMEX_MAX_Buffer;
-	bufferDesc[bufferIDXUser].isFree = 1;
-//	printk(KERN_INFO "%s: bufferDesc[%d].isFree = %d\n", __FUNCTION__, bufferIDXUser, bufferDesc[bufferIDXUser].isFree);
+	down_interruptible(&COMEX_Remote_MUTEX);
+
+	while(list_empty(&RDMA_qHead[i])){
+		i++;
+	}	
+	myBufferDescUser = list_first_entry(&RDMA_qHead[i], BufferDescUser, link);
+	memcpy(info->data, myBufferDescUser, sizeof(BufferDescUser));
+	
+//	printk(KERN_INFO "%d %d \n", i, myBufferDescUser->buffIDX);
+	bufferDesc[i][myBufferDescUser->buffIDX].isFree = 1;
+	list_del(&myBufferDescUser->link);
+//	RDMA_write_signal = 1;	
+
+	up(&COMEX_Remote_MUTEX);
+	
+	/* assign this info struct to the file */
+	filp->private_data = info;
+	return 0;
+}
+
+int my_open_pageFault(struct inode *inode, struct file *filp)
+{
+	struct mmap_info *info = kmalloc(sizeof(struct mmap_info), GFP_KERNEL);
+	
+	PF_Desc *myPF_Desc;
+	int i=0;
+	
+	/* obtain new memory */
+    info->data = (char *)get_zeroed_page(GFP_KERNEL);
+
+	while(list_empty(&PF_head[i]))
+		i++;	
+	myPF_Desc = list_first_entry(&PF_head[i], PF_Desc, link);
+	memcpy(info->data, myPF_Desc, sizeof(PF_Desc));
+	
+	list_del(&myPF_Desc->link);
 	
 	/* assign this info struct to the file */
 	filp->private_data = info;
@@ -116,5 +164,10 @@ static const struct file_operations my_fops_givePages = {
 static const struct file_operations my_fops_RDMA_write = {
 	.open = my_open_RDMA_write,
 	.release = my_close,
+	.mmap = my_mmap,
+};
+static const struct file_operations my_fops_pageFault = {
+	.open = my_open_pageFault,
+	.release = my_close_pageFault,
 	.mmap = my_mmap,
 };

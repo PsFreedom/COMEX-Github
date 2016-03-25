@@ -25,7 +25,8 @@ struct msghdr msg;
 struct sigaction sig;
 
 struct rdma_cb **cb_pointers;
-//char RDMAmsg[64];
+
+unsigned long COMEX_Read_Buffer_Offset;
 
 void sendRDMA_CB_number(int NodeID, char *RDMAmsg, int imm)
 {
@@ -90,7 +91,7 @@ void receiveData(int n, siginfo_t *info, void *unused)
 	}
 	else if(cmd_number == 12000){
 //		printf("received value %i\n", cmd_number);
-		BufferDescUser *myBufferDescUser;
+		BufferDescUser *myBufferDescUser = NULL;
 	
 		configfd = open("/sys/kernel/debug/comex_dir/comex_RDMA_write", O_RDWR);
 		if(configfd < 0) {
@@ -103,10 +104,42 @@ void receiveData(int n, siginfo_t *info, void *unused)
 			return;
 		}
 		
-		printf("To %d IDX %d R %lu\n", myBufferDescUser->nodeID, myBufferDescUser->buffIDX, myBufferDescUser->r_Offset);
+//		printf("To %d L %lu R %lu\n", myBufferDescUser->nodeID, myBufferDescUser->l_Offset, myBufferDescUser->r_Offset);
+//		checkSumPage(myBufferDescUser->l_Offset + COMEX_Area);
+
+		do_write(cb_pointers[myBufferDescUser->nodeID], myBufferDescUser->l_Offset, myBufferDescUser->r_Offset, 4096);
+//		sendRDMA_CB_number(myBufferDescUser->nodeID, (char *)&myBufferDescUser->r_Offset, 9001);
+
 		munmap(myBufferDescUser, PAGE_SIZE);
 		close(configfd);
 	}
+	else if(cmd_number == 13000){
+		PF_Desc *myPF_Desc;
+		
+		configfd = open("/sys/kernel/debug/comex_dir/comex_pFault", O_RDWR);
+		if(configfd < 0) {
+			perror("open");
+			return;
+		}
+		myPF_Desc = (PF_Desc *)mmap(NULL, PAGE_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, configfd, 0);
+		if (myPF_Desc == MAP_FAILED) {
+			perror("mmap");
+			return;
+		}
+//		printf("COMEX page fault: %d %lu %lu\n", myPF_Desc->nodeID, myPF_Desc->L_offset, myPF_Desc->R_offset);
+//		checkSumPage(myPF_Desc->L_offset + COMEX_Area);
+
+		do_read(cb_pointers[myPF_Desc->nodeID], myPF_Desc->L_offset, myPF_Desc->R_offset, 4096);
+//		sendRDMA_CB_number(myPF_Desc->nodeID, (char *)&myPF_Desc->R_offset, 9001);
+//		checkSumPage(myPF_Desc->L_offset + COMEX_Area);
+
+		munmap(myPF_Desc, PAGE_SIZE);
+		close(configfd);
+	}
+//	else if(cmd_number == 13001){									// Test
+//		printf(" >>> received value %i\n", cmd_number);				// Test
+//		checkSumPage(COMEX_Read_Buffer_Offset + COMEX_Area + 4096);	// Test
+//	}																// Test
 }
 
 void init_SignalHandler(){
@@ -165,6 +198,9 @@ int main(int argc, char *argv[])
 	SharedMem_Addr = SharedMem_Addr + totalMem - COMM_BUFFER;
 	myCommStruct = (CommStruct *)SharedMem_Addr;
 	printf("NodeID %d totalCB %d\n", myCommStruct->NodeID, myCommStruct->totalCB);
+	printf("Write_Buffer_Offset %lu Read_Buffer_Offset %lu\n", myCommStruct->Write_Buffer_Offset, myCommStruct->Read_Buffer_Offset);
+	
+	COMEX_Read_Buffer_Offset = myCommStruct->Read_Buffer_Offset;
 	
 	for(i=0; i<totalCB; i++){
 //		sprintf(RDMAmsg,"Hello msg from node %d", nodeID); sendRDMA_CB_number(i, 2000);

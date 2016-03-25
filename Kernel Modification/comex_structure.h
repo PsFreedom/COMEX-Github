@@ -41,11 +41,11 @@ unsigned long COMEX_Comm_addr;
 unsigned long *comexLookUP;
 
 static spinlock_t COMEX_Buddy_lock;
-static spinlock_t COMEX_Remote_lock;
 
 atomic_t ShrinkPL_counter;
 struct semaphore COMEX_Remote_MUTEX;
 struct semaphore COMEX_ReadBack_MUTEX;
+struct semaphore COMEX_ReadBack_FlowLock;
 
 void print_free_blocks(void);
 
@@ -63,7 +63,6 @@ unsigned long Prev_R_offset = 0;
 unsigned long RDMA_jiffies = 0;
 unsigned long Request_jiffies = 0;
 
-void NL_send_message(char *NetlinkMSG);
 int powOrder(int Order);
 int get_Frist_PID(struct page *page);
 unsigned long COMEX_get_from_Buddy(int order);
@@ -110,15 +109,16 @@ COMEX_R_page_group **page_groups;
 int *page_groupsIDX_Fill;
 int *page_groupsIDX_Use;
 
+int RDMA_write_signal = 1;
+int RDMA_writeQ_IDX = 0;
 typedef struct Remote_buffer_descriptor{	//For user
+	struct list_head link;
 	int nodeID, buffIDX;
 	unsigned long l_Offset;
 	unsigned long r_Offset;
 } BufferDescUser;
 BufferDescUser *RDMA_writeQ;
-
-int bufferIDX = 0;
-int bufferIDXUser = 0;
+struct list_head *RDMA_qHead;
 
 typedef struct replyPagesQueue{		//For user
 	int target, order, oriOrder;
@@ -128,9 +128,11 @@ replyPagesDesc *replyPagesQ;
 int replyPagesQCounter = 0;
 int replyPagesQReader = 0;
 
-typedef struct COMEX_buffer_descriptor{
-	int isFree;
-	struct page *pageDesc;
-	unsigned long Offset;
-} COMEXbuffer;
-COMEXbuffer *bufferDesc;
+int *bufferIDX;
+int *bufferIDX_ReadBack;
+COMEXbuffer **bufferDesc;
+COMEXbuffer **bufferDesc_ReadBack;
+
+PF_Desc *comex_PF_Desc;
+struct list_head *PF_head;
+int PF_headIDX=0;
